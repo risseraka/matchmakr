@@ -1,0 +1,14 @@
+{
+    "properties": {
+        "type": {
+            "type": "string"
+        },
+        "profile": {
+            "type": "string"
+        },
+        "skills": {
+            "type": "string",
+            "index": "not_analyzed"
+        }
+    }
+}

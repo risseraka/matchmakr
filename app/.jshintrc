@@ -1,0 +1,8 @@
+{
+  "camelcase": false,
+  "expr": false,
+  "nocomma": false,
+  "strict": true,
+  "node": true,
+  "mocha": true
+}
