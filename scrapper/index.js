@@ -40,7 +40,7 @@ app.get('/', function getAllPages(req, res) {
 });
 
 app.get('/:url', function getPage(req, res) {
-    var pageUrl = req.params.url;
+    var pageUrl = req.url.slice(1);
 
     console.log('getting:', pageUrl);
 
