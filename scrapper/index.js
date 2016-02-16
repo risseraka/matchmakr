@@ -9,13 +9,13 @@ var express = require('express');
 var morgan = require('morgan');
 
 function sanitizeHTML(html) {
-    return html
-        .replace(/src=/g, '')
-        .replace(/href=/g, '');
+  return html
+    .replace(/src=/g, '')
+    .replace(/href=/g, '');
 }
 
 function getFilePath(url) {
-    return path.join('pages', url.replace(/\//g, '_'));
+  return path.join('pages', url.replace(/\//g, '_'));
 }
 
 var app = express();
@@ -23,67 +23,67 @@ var app = express();
 app.use(morgan('dev'));
 
 app.all('*', function (req, res, next) {
-    res.header("Access-Control-Allow-Origin", req.headers.origin);
+  res.header("Access-Control-Allow-Origin", req.headers.origin);
 
-    next();
+  next();
 });
 
 app.get('/', function getAllPages(req, res) {
-    fs.readdir('pages', function (err, files) {
-        if (err) {
-            res.statusCode = 500;
-            return res.end(err.message);
-        }
+  fs.readdir('pages', function (err, files) {
+    if (err) {
+      res.statusCode = 500;
+      return res.end(err.message);
+    }
 
-        res.end(JSON.stringify(files).replace(/_/g, '/'));
-    });
+    res.end(JSON.stringify(files).replace(/_/g, '/'));
+  });
 });
 
 app.get('/:url', function getPage(req, res) {
-    var pageUrl = req.url.slice(1);
+  var pageUrl = req.url.slice(1);
 
-    console.log('getting:', pageUrl);
+  console.log('getting:', pageUrl);
 
-    var filePath = getFilePath(pageUrl);
+  var filePath = getFilePath(pageUrl);
 
-    fs.readFile(filePath, function (err, data) {
-        if (err) {
-            res.statusCode = 404;
-            return res.end('no such page: ' + pageUrl);
-        }
+  fs.readFile(filePath, function (err, data) {
+    if (err) {
+      res.statusCode = 404;
+      return res.end('no such page: ' + pageUrl);
+    }
 
-        data = sanitizeHTML(data.toString());
+    data = sanitizeHTML(data.toString());
 
-        res.end(data);
-    });
+    res.end(data);
+  });
 });
 
 app.post('*', function scrapping(req, res) {
-    var pageUrl = req.query.url;
+  var pageUrl = req.query.url;
 
-    console.log(req.query);
+  console.log(req.query);
 
-    if (! pageUrl) {
-        res.statusCode = 400;
-        return res.end('missing page URL');
-    }
+  if (! pageUrl) {
+    res.statusCode = 400;
+    return res.end('missing page URL');
+  }
 
-    console.log('scrapping:', pageUrl);
+  console.log('scrapping:', pageUrl);
 
-    var filePath = getFilePath(pageUrl);
+  var filePath = getFilePath(pageUrl);
 
-    req.pipe(fs.createWriteStream(filePath));
+  req.pipe(fs.createWriteStream(filePath));
 
-    req.on('end', function () {
-        res.end('okbye ' + req.protocol || 'http');
-    });
+  req.on('end', function () {
+    res.end('okbye ' + req.protocol || 'http');
+  });
 });
 
 http.createServer(app).listen(3333);
 
 var options = {
-    key: fs.readFileSync('ssl/test_key.pem'),
-    cert: fs.readFileSync('ssl/test_cert.pem')
+  key: fs.readFileSync('ssl/test_key.pem'),
+  cert: fs.readFileSync('ssl/test_cert.pem')
 };
 
 https.createServer(options, app).listen(8000);

@@ -1,18 +1,18 @@
 {
-    "properties": {
-        "id": {
-            "type": "string"
-        },
-        "name": {
-            "type": "string"
-        },
-        "skills": {
-            "type": "string",
-            "index": "not_analyzed"
-        },
-        "companies": {
-            "type": "string",
-            "index": "not_analyzed"
-        }
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "skills": {
+      "type": "string",
+      "index": "not_analyzed"
+    },
+    "companies": {
+      "type": "string",
+      "index": "not_analyzed"
     }
+  }
 }
