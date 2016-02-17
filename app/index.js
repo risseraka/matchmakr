@@ -582,8 +582,17 @@ function createNeeds(req, res, next) {
 
     async.map(results, function (result, callback) {
       fetchOneNeed(result._id, callback);
-    }, function (err, results) {
-      next(err, results);
+    }, function (err, result) {
+      if (err) { return next(err); }
+
+      var fakeResult = {
+        hits: {
+          total: result.length,
+          hits: result
+        }
+      };
+
+      handleNeedsResults(next)(null, fakeResult);
     });
   });
 }
@@ -666,8 +675,6 @@ function getAllNeeds(req, res, next) {
 needsRouter.get('/', passResult(getAllNeeds), sendNeedsResults);
 
 function buildNeedLinks(need) {
-  console.log('need:', need);
-
   var skillsLinks = need.skills.map(function (skill) {
     return {
       name: skill,
@@ -765,8 +772,6 @@ function deleteNeed(req, res, next) {
     type: 'needs',
     id: req.params.needId
   }, function (err, result) {
-    console.log(err, result);
-
     if (err) { return next(err); }
 
     res.result = {
@@ -849,9 +854,8 @@ function fetchOneNeed(id, next) {
 }
 
 function fetchSimilarNeeds(req, res, next) {
-  var need = req.need;
-
-  var needType = need.type;
+  var need = req.need._source;
+  var id = req.need._id;
 
   client.search({
     index: 'matchmakr',
@@ -866,12 +870,12 @@ function fetchSimilarNeeds(req, res, next) {
             }
           }, {
             terms: {
-              types: [ needType ]
+              types: [ need.type ]
             }
           }],
           must_not: [{
             ids: {
-              values: [ need._id ]
+              values: [ id ]
             }
           }]
         }
@@ -881,7 +885,7 @@ function fetchSimilarNeeds(req, res, next) {
 }
 
 function fetchMatchingNeeds(req, res, next) {
-  var need = req.need;
+  var need = req.need._source;
 
   var needType = getOtherNeedType(need.type);
 

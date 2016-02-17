@@ -31,7 +31,7 @@ fs.readdir('profiles', function (err, filesNames) {
     return !name.match('gitignore');
   }).map(getFilePath).map(require);
 
-  async.each(profiles, importProfile, function (err) {
+  async.eachLimit(profiles, 10, importProfile, function (err) {
     if (err) {
       console.error(err);
     }
