@@ -231,7 +231,7 @@ function fetchAllProfileFields(field) {
       var items = result.aggregations.items.buckets.map(function (item) {
         return {
           total: item.doc_count,
-          name: item.key,
+          title: item.key,
           href: '/profiles/?' + field + '=' + encodeURIComponent(item.key)
         };
       });
@@ -385,7 +385,7 @@ indexRouter.get('/:type/:path?', passResult(function (req, res, next) {
     var items = index[key];
 
     var link = items.length === 1 ? {
-      name: items[0].name || items[0],
+      title: items[0].name || items[0],
       rel: type,
       href: '&' + type + '=' + (items[0].id || items[0].name || items[0]),
       key: key.substr(-1)
@@ -491,7 +491,7 @@ formsRouter.get('/needs', function (req, res, next) {
 
   params.reduce(function (links, type) {
     var link = {
-      name: type,
+      title: type,
       href: '/index/' + type + '?next=' + encodeURIComponent(req.uri)
     };
 
@@ -677,7 +677,7 @@ needsRouter.get('/', passResult(getAllNeeds), sendNeedsResults);
 function buildNeedLinks(need) {
   var skillsLinks = need.skills.map(function (skill) {
     return {
-      name: skill,
+      title: skill,
       href: '/skills/' + encodeURIComponent(skill)
     };
   });
@@ -1013,14 +1013,14 @@ profilesRouter.param('profileId', getOneProfile);
 function buildProfileLinks(profile) {
   var skillsLinks = profile.skills.map(function (skill) {
     return {
-      name: skill,
+      title: skill,
       href: '/skills/' + encodeURIComponent(skill)
     };
   });
 
   var companiesLinks = profile.companies.map(function (company) {
     return {
-      name: company,
+      title: company,
       href: '/companies/' + encodeURIComponent(company)
     };
   });
