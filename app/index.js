@@ -19,6 +19,7 @@ var client = new elasticsearch.Client({
 var express = require('express');
 var bodyParser = require('body-parser');
 var morgan = require('morgan');
+var cors = require('cors');
 var compression = require('compression')
 var linksAbsolutizer = require('hal-url-absolutizer');
 
@@ -76,11 +77,12 @@ function getProfileUrl(id) {
   return '/profiles/' + id;
 }
 
-app.all('*', function (req, res, next) {
-  res.header('Access-Control-Allow-Origin', '*');
-
-  next();
-});
+app.use(cors({
+  credentials: true,
+  origin: function (origin, callback) {
+    callback(null, true);
+  }
+}));
 
 app.use(morgan('common'));
 app.use(compression());
@@ -383,11 +385,13 @@ indexRouter.get('/:type/:path?', passResult(function (req, res, next) {
 
   links.keys = keys.map(function (key) {
     var items = index[key];
+    var item = items[0];
+    var title = item.title || item.name || item;
 
     var link = items.length === 1 ? {
-      title: items[0].name || items[0],
+      title: title,
       rel: type,
-      href: '&' + type + '=' + (items[0].id || items[0].name || items[0]),
+      href: '&' + type + '=' + title,
       key: key.substr(-1)
     } : {
       rel: 'index',
@@ -977,7 +981,7 @@ function getAllProfiles(req, res, next) {
     return res.redirect('/' + 'profiles' + '/' + encodeURIComponent(req.query.profiles));
   }
 
-  if (req.query.skills || req.query.companies) {
+  if (req.query.skills || req.query.companies || req.query.name) {
     return fetchAllProfilesBy(req.query, next);
   }
 
@@ -1055,7 +1059,7 @@ app.use(linksAbsolutizer({
 }));
 
 app.use(function (req, res, next) {
-  if (req.is('json') || req.query.format === 'json') {
+  if (req.accepts(['html', 'json']) === 'json' || req.query.format === 'json') {
     return res.json(res.result);
   }
 
