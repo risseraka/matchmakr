@@ -1,5 +1,7 @@
 'use strict';
 
+console.time('started in');
+
 const liveReload = `<script type="text/javascript">
 function checkReload(etag) {
   fetch(new Request('/livereload')).catch(() => window.location.reload());
@@ -7,12 +9,122 @@ function checkReload(etag) {
 checkReload();
 </script>`;
 
-// http://stackoverflow.com/questions/990904/remove-accents-diacritics-in-a-string-in-javascript
-function normalize(str) {
-  if (normalize.memo[str]) return normalize.memo[str];
-  return normalize.memo[str] = str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+function memoize(func) {
+  return func;
+  const memo = {};
+  return (...args) => {
+    if (memo[args]) return memo[args];
+    return memo[args] = func.apply(this, args);
+  };
 }
-normalize.memo = {};
+
+// http://stackoverflow.com/questions/990904/remove-accents-diacritics-in-a-string-in-javascript
+function normalizeW(str) {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+const normalize = memoize(normalizeW);
+
+function get(obj, fields) {
+  if (!obj || !fields) return obj;
+
+  if (typeof fields === 'string') fields = fields.split('.');
+
+  for (let i = 0, j = fields.length; i < j; i += 1) {
+    if (Array.isArray(obj) && !(fields[i] in obj)) {
+      return obj.map(o => get(o, fields.slice(i)));
+    }
+    obj = obj[fields[i]];
+  }
+
+  return obj;
+}
+
+function uniqueW(arr) {
+  if (!arr) return [];
+  return [...new Set(arr)];
+}
+
+const unique = memoize(uniqueW);
+
+function closure(...args) {
+  const func = args.pop();
+  return func(...args);
+}
+
+function intersection(arr1, arr2) {
+  return arr1.filter(e => arr2.includes(e));
+}
+
+function intersects(arr1, arr2) {
+  return arr1.some(e => arr2.includes(e));
+}
+
+function union(...args) {
+  return [].concat(...args);
+}
+
+function arrayify(obj) {
+  return [].concat(obj);
+}
+
+function compareStrings(a, b) {
+  return a === b ? 0 : (a < b ? 1 : -1);
+}
+
+function compareInts(a, b) {
+  return (a | 0) - (b | 0);
+}
+
+function sortBy(field, reverse) {
+  return arr => arr.sort((a, b) => (a[field] - b[field]) * (reverse ? -1 : 1));
+}
+
+function sortWith(arr, func, reverse) {
+  return arr.sort((a, b) => (func(a) - func(b)) * (reverse ? -1 : 1));
+}
+
+function filterBy(field, func) {
+  return arr => arr.filter(e => func(e[field]));
+}
+
+function flatMap(arr, func) {
+  return [...arr.map(func)];
+}
+
+function index(arr, field, unique, format) {
+  const formatItems = typeof format !== 'function' ? e => get(e, format) : format;
+
+  return arr.reduce((r, e) => {
+    const key = !field ?
+            e :
+            (typeof field === 'function' ? field(e) : get(e, field));
+
+    return [...[].concat(key)]
+      .reduce((r, key) => {
+        if (typeof key === 'string') key = normalize(key);
+        e = formatItems(e);
+        r[key] = unique ? e : (r[key] || []).concat(e);
+        return r;
+      }, r);
+  }, {});
+}
+
+function mapField(profiles, field, formatItems = e => e) {
+  const fieldIndex = index(profiles, field, false);
+
+  const map = Object.keys(fieldIndex).map(name => closure(
+    fieldIndex[name],
+    items => ({
+      name,
+      items: typeof formatItems === 'function' ?
+        formatItems(items) :
+        get(items, formatItems),
+      count: items.length,
+    })
+  ));
+  map.index = fieldIndex;
+  return map;
+}
 
 function stringifyToHTML(obj) {
   if (typeof obj !== 'object') return obj ? obj.toString() : '';
@@ -28,82 +140,11 @@ function Search(haystack, exclude = []) {
   const stringed = haystack.map(p => normalize(stringify(p, exclude).join(' ')));
 
   const search = (needle) => {
-    needle = [].concat(needle).map(n => normalize(n));
+    needle = arrayify(needle).map(normalize);
     return stringed.filter(e => needle.every(n => e.includes(n))).map(e => e.split(' ')[0]);
   };
   search.stringed = stringed;
   return search;
-}
-
-function get(obj, fields) {
-  if (!obj || !fields) return obj;
-
-  if (typeof fields === 'string') fields = fields.split('.');
-
-  if (fields.length === 1) {
-    return obj[fields[0]];
-  }
-
-  for (let i = 0, j = fields.length; i < j; i += 1) {
-    if (Array.isArray(obj) && !(fields[i] in obj)) {
-      return obj.map(o => get(o, fields.slice(i)));
-    }
-    obj = obj[fields[i]];
-  }
-
-  return obj;
-}
-
-function filterProfiles(profiles, field, value) {
-  const values = [].concat(value).map(e => normalize(e));
-
-  return profiles.filter(
-    p => values.filter(
-      v => get(p, field).some(s => normalize(s) === v)
-    ).length === values.length
-  );
-}
-
-function index(arr, field, unique) {
-  return arr.reduce((r, e) => {
-    const key = (field ? (typeof field === 'function' ? field(e) : get(e, field)) : e);
-
-    return [].concat(key)
-      .reduce((r, e) => r.concat(e), [])
-      .reduce((r, key) => {
-        if (typeof key === 'string') key = normalize(key);
-        r[key] = unique ? e : (r[key] || []).concat(e);
-        return r;
-      }, r);
-  }, {});
-}
-
-function mapField(profiles, field) {
-  const fieldIndex = index(profiles, field, false);
-
-  const map = Object.keys(fieldIndex).map(name => ({
-    name,
-    items: fieldIndex[name],
-    count: fieldIndex[name].length,
-  }) );
-  map.index = fieldIndex;
-  return map;
-}
-
-function compareStrings(a, b) {
-  return a < b ? (a === b ? 0 : 1) : -1;
-}
-
-function sortBy(field, reverse) {
-  return arr => arr.sort((a, b) => (a[field] - b[field]) * (reverse ? -1 : 1));
-}
-
-function sortWith(arr, func, reverse) {
-  return arr.sort((a, b) => (func(a) - func(b)) * (reverse ? -1 : 1));
-}
-
-function filterBy(field, func) {
-  return arr => arr.filter(e => func(e[field]));
 }
 
 const sortByCountDesc = sortBy('count', true);
@@ -127,6 +168,16 @@ profiles.forEach(p => {
 });
 
 profiles.index = index(profiles, 'id', true);
+
+function filterProfiles(profiles, field, value) {
+  const values = arrayify(value).map(normalize);
+
+  return profiles.filter(
+    p => values.filter(
+      v => get(p, field).some(s => normalize(s) === v)
+    ).length === values.length
+  );
+}
 
 const search = Search(profiles, ['profileUrl']);
 
@@ -154,6 +205,18 @@ const endorsers = index(profiles.reduce(
   ), []
 ), 'endorser');
 
+const endorsees = index(profiles.reduce(
+  (r, p) => p.skills.reduce(
+    (r, s) => s.endorsers.reduce(
+      (r, endorser) => (r.push({
+        id: endorser,
+        name: s.name,
+        endorsee: p.id,
+      }), r), r
+    ), r
+  ), []
+), 'endorsee');
+
 const app = express();
 
 app.use(morgan('dev'));
@@ -163,6 +226,23 @@ app.use((req, res, next) => {
   //  res.send = str => send.call(res, liveReload + (str || ''));
   next();
 });
+
+app.memo = {};
+function sendCache(req, res, next) {
+  const resSend = res.send.bind(res);
+
+  if (app.memo[req.url]) {
+    return resSend(app.memo[req.url]);
+  }
+
+  res.send = result => {
+    app.memo[req.url] = result;
+    resSend(result);
+  };
+
+  next();
+}
+app.use(sendCache);
 
 app.get('/search', (req,res) => res.send(search.stringed));
 
@@ -214,7 +294,7 @@ app.get('/profiles', (req, res) => {
   if (req.query.q) {
     req.query = mergeQueries(req, parseQuery(req.query.q));
 
-    const q = req.query.q.map(q => normalize(q));
+    const q = req.query.q.map(normalize);
     results = search(q).map(i => indices.profiles[i]);
   }
 
@@ -224,11 +304,12 @@ app.get('/profiles', (req, res) => {
   }
 
   if (req.query['skills.name']) {
-    req.query['skills.name'] = []
-      .concat(req.query['skills.name'])
-      .reduce((r, e) => r.concat(e.split(',')), []);
+    req.query['skills.name'] = flatMap(
+      arrayify(req.query['skills.name']),
+      e => e.split(',')
+    );
 
-    const skills = [].concat(req.query['skills.name']).map(e => normalize(e));
+    const skills = arrayify(req.query['skills.name']).map(normalize);
 
     results = filterProfiles(results, 'skills.name', req.query['skills.name']);
 
@@ -270,41 +351,184 @@ app.get('/profiles', (req, res) => {
   res.send(`total: ${results.length}<br/>${resultsHTML.join('')}`);
 });
 
-app.get('/profiles/:id', (req, res, next) => {
+function formatProfileIds(ids, func) {
+  if (!ids) return [];
+
+  return [
+    ...ids
+      .filter(e => indices.profiles[e])
+      .map(e => indices.profiles[e])
+      .sort((a, e) => compareStrings(e.name, a.name))
+      .map(func || format.profile),
+    ...ids.filter(e => !indices.profiles[e]).sort(compareInts)
+  ];
+}
+
+app.get('/profiles/:id', (req, res) => {
   const id = req.params.id;
 
   const profile = indices.profiles[id];
-
   if (!profile) return res.status(404).send();
+
+  const { friends, endorsees, endorsers, network } = networks.index[id];
 
   let result = JSON.parse(JSON.stringify(profile));
 
-  result.profileUrl = `<a href="${result.profileUrl}" target=_blank>LinkedIn</a>`;
-  const xp1 = result.positions.reduce((r, p) => p.startDate < r.startDate ? p : r);
-  result = Object.assign({ id, seniority: xp1 && xp1.startDate ? new Date().getFullYear() - new Date(xp1.startDate).getFullYear() : 'N/A' }, result);
-  result.skills.forEach(s => {
-    s.name = `<a href="/profiles?skills.name=${encodeURIComponent(s.name)}">${s.name}</a>`;
-    if (!s.endorsers.length) {
-      delete s.endorsers;
-      return;
-    }
-    s.endorsers = s.endorsers
-      .map(e => indices.profiles[e] || e);
-    s.endorsers = []
-      .concat(
-        s.endorsers.filter(e => !Number.isInteger(+e)).sort((a, b) => compareStrings(b.name, a.name)),
-        s.endorsers.filter(e => Number.isInteger(+e)).sort()
+  result = closure(
+    result,
+    ({ positions, skills, profileUrl, }) => Object.assign({
+      id,
+      seniority: closure(
+        positions.reduce(
+          (r, p) => (p.startDate | 0) < (r.startDate | 0) ? p : r
+        ),
+        xp1 => xp1 && xp1.startDate ?
+          new Date().getFullYear() - new Date(xp1.startDate).getFullYear() :
+          'N/A'
       )
-      .map(p => p.name ? `<a href="/profiles/${p.id}">${p.name}</a>` : p);
-  });
-  result.positions.forEach(s => {
-    if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
-    if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
-    s.companyName = `<a href="/profiles?positions.companyName=${encodeURIComponent(s.companyName)}">${s.companyName}</a>`;
-    s.title = `<a href="/profiles?positions.title=${encodeURIComponent(s.title)}">${s.title}</a>`;
-  });
+    }, result, {
+      profileUrl: `<a href="${profileUrl}" target=_blank>LinkedIn</a>`,
+      skills: skills.map(s => {
+        s.name = `<a href="/profiles?skills.name=${encodeURIComponent(s.name)}">${s.name}</a>`;
+        if (s.endorsers && s.endorsers.length) s.endorsers = formatProfileIds(s.endorsers);
+        else delete s.endorsers;
+        return s;
+      }),
+      positions: positions.map(s => {
+        if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
+        if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
+        s.companyName = `<a href="/profiles?positions.companyName=${encodeURIComponent(s.companyName)}">${s.companyName}</a>`;
+        s.title = `<a href="/profiles?positions.title=${encodeURIComponent(s.title)}">${s.title}</a>`;
+        return s;
+      }),
+      friends: formatProfileIds(friends),
+      endorsed: formatProfileIds(endorsees),
+      endorsers: formatProfileIds(endorsers),
+      network: formatProfileIds(network),
+    })
+  );
 
   res.send(stringifyToHTML(result) + `<code>${JSON.stringify(result)}</code>`);
+});
+
+function formatProfile(profile) {
+  const { id, name } = profile;
+  return name ? `${id}: ${name}` : id;
+}
+
+app.get('/profiles/:id/map', (req, res) => {
+  const profile = indices.profiles[req.params.id];
+  if (!profile) return res.status(404).send();
+
+  const { id, name } = profile;
+
+  const pendorsers = unique(get(endorsees[id], 'id'));
+  const pendorsees = unique(get(endorsers[id], 'id'));
+  const connecteds = unique(union(pendorsers, pendorsees));
+  const friends = intersection(pendorsers, pendorsees);
+
+  if (false) {
+    const ndir = connecteds
+            .filter(p => intersection(union(
+              unique(get(endorsees[p], 'id')),
+              unique(get(endorsers[p], 'id'))
+            ), connecteds).length)
+            .sort();
+
+    const network = unique(ndir);
+  }
+
+  const ndir = flatMap(connecteds, p => (
+    intersection(
+      unique(union(
+        unique(get(endorsees[p], 'id')),
+        unique(get(endorsers[p], 'id'))
+      )),
+      connecteds
+    )
+      .map(id => ({ id: +id, from: p }))
+  )).sort();
+
+  const network = unique(get(ndir, 'from'));
+
+  const mapped = mapField(ndir, 'id', 'from');
+  const inter = index(
+    sortByCountDesc(mapped.filter(e => e.count > 1)),
+    'items',
+    true,
+    ({ name, items, count }) => ({
+      name: closure(indices.profiles[name], p => p ? p.name : name),
+      items: formatProfileIds(items, formatProfile),
+      count,
+    })
+  );
+
+  console.log('sending');
+
+  res.send({
+    id,
+    name,
+    pendorsers: formatProfileIds(pendorsers, formatProfile),
+    pendorsees: formatProfileIds(pendorsees, formatProfile),
+    connecteds: formatProfileIds(connecteds, formatProfile),
+    friends: formatProfileIds(friends, formatProfile),
+    network: formatProfileIds(network, formatProfile),
+    mapped,
+    inter,
+  });
+});
+
+const allEndorsees = Object.keys(endorsees);
+const allEndorsers = Object.keys(endorsers);
+const all = unique(union(allEndorsees, allEndorsers, get(profiles, 'id')).map(id => +id));
+const networks = all.map(a => {
+  const profile = indices.profiles[a] || { id: +a };
+
+  const { id, name = '' } = profile;
+
+  const pendorsers = unique(get(endorsees[id], 'id'));
+  const pendorsees = unique(get(endorsers[id], 'id'));
+  const connecteds = unique(union(pendorsers, pendorsees));
+  const friends = intersection(pendorsers, pendorsees);
+
+  return { id, name, friends, endorsers: pendorsers, endorsees: pendorsees, connecteds };
+});
+networks.index = index(networks, 'id', true);
+
+networks.forEach(f => {
+  const { id, friends, connecteds } = f;
+
+  const network = connecteds
+          .filter(p => {
+            if (!networks.index[p]) {
+              console.log(f, p);
+            }
+            return intersection(networks.index[p].connecteds, connecteds).length;
+          });
+
+  f.network = network;
+});
+networks.sort((a, b) => compareInts(b.network.length, a.network.length));
+
+app.get('/map', (req, res) => {
+  const { sort } = req.query;
+
+  let results = networks.slice();
+  if (sort) {
+    const reverse = sort.match(/^-/);
+    const field = reverse ? sort.slice(1) : sort;
+    console.log(field);
+    results.sort((a, b) => closure(
+      get(a, field),
+      get(b, field),
+      (a, b) =>
+        (reverse ? -1 : 1) *
+        (Number.isInteger(a - b) ?
+          compareInts(b, a)
+          : compareStrings(b, a))
+    ));
+  }
+  res.send(results.slice(0, +req.query.size || 10));
 });
 
 app.get('/skills.name', (req, res) => {
@@ -459,4 +683,4 @@ ${err.message}<hr/>
 
 const port = 3000;
 
-app.listen(port, () => console.info(`running on port ${port}`));
+app.listen(port, () => console.timeEnd('started in') || console.info(`running on port ${port}`));
