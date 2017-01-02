@@ -1,42 +1,131 @@
-var fs = require('fs');
-var path = require('path');
-var async = require('async');
-var jsdom = require('jsdom');
+const fs = require('fs');
+const path = require('path');
 
-function parse(file, html, callback) {
-  jsdom.env(html, function (err, window) {
-    if (err) { return process.exit(1); }
+function pluck(obj/*, ...fields*/) {
+  const fields = Array.prototype.slice.call(arguments, 1);
+  return fields.reduce((r, f) => (obj[f] && (r[f] = obj[f]), r), {});
+}
 
-    var pills = window.document.querySelectorAll('.skill-pill > span');
+function pick(arr/*, ...fields*/) {
+  const fields = Array.prototype.slice.call(arguments, 1);
+  return arr.map(obj => fields.reduce((r, f) => {
+    if (Array.isArray(f)) {
+      r[f[0]] = f[1](obj);
+      return r;
+    }
+    obj[f] && (r[f] = obj[f]);
+    return r;
+  }, {}));
+}
 
-    pills = Array.prototype.slice.call(pills);
+function getDirPath(id) {
+  return path.join('pages', id);
+}
 
-    var skills = pills.map(function (el) {
-      return el.textContent;
-    });
+function getIndexPath(id) {
+  return path.join('pages', `${id}.json`);
+}
 
-    return callback(null, skills);
+function getPageIdPath(id, pageId) {
+  return path.join('pages', id, pageId);
+}
+
+function loadPages(pages) {
+  return pages.map(page => {
+    const data = fs.readFileSync(page.path);
+    try {
+      return JSON.parse(data);
+    } catch (e) {
+    }
+    return {};
   });
 }
 
-var filesPaths = Array.prototype.slice.call(process.argv, 2);
+const parse = {
+  info(data) {
+    const info = data.BasicInfo.basic_info;
 
-async.map(filesPaths, function (filePath, callback) {
-  console.log(filePath);
+    const { fullname: name } = info;
+    return {
+      id: info.memberID,
+      name,
+    };
+  },
+  skills(data) {
+    const skills = data.Skills.skillsMpr.skills;
+    if (!skills) return [];
 
-  fs.readFile(filePath, function (err, file) {
-    if (err) { callback(err); }
+    return pick(
+      skills,
+      'name',
+      'endorsementCount',
+      ['endorsers', s => (s.endorserInfo || []).map(i => i.endorserId)]
+    );
+  },
+  positions(data) {
+    const positions = data.Experience.positionsMpr.positions;
+    if (!positions) return [];
 
-    console.log('read:', filePath);
+    return positions.map(p => Object.assign(pluck(
+      p,
+      'companyName', 'title', 'locationName', 'startDate', 'endDate'
+    ), {
+      startDate: p.startDate && p.startDate.asDate,
+      endDate: p.endDate && p.endDate.asDate
+    }));
+  },
+};
 
-    parse(filePath, file.toString(), function (err, skills) {
-      if (err) { callback(err); }
+const memberId = process.argv[2];
 
-      callback(null, skills);
-    });
+const dirPath = getDirPath(memberId);
+
+const indexPath = getIndexPath(memberId);
+const index = fs.existsSync(indexPath) ?
+        JSON.parse(fs.readFileSync(indexPath)) : {};
+
+const pages = Object.keys(index)
+  .map(pageId => ({
+    pageId,
+    pageUrl: index[pageId],
+    path: getPageIdPath(memberId, pageId),
+  }));
+
+const connections = loadPages(
+  pages.filter(page => page.pageUrl.match('api/v2/contacts'))
+).reduce((r, data) => {
+  if (!data) return r;
+
+  return r.concat(pick(
+    data.values,
+    'memberId',
+    ['profileUrl', s => s.profileUrl.split('&authType')[0]]
+  ));
+}, []).reduce((r, c) => {
+  r[c.memberId] = c;
+  c.id = c.memberId;
+  delete c.memberId;
+  return r;
+}, {});
+
+const contacts = loadPages(
+  pages.filter(page => page.pageUrl.match('profile/mappers'))
+).map(e => e.content);
+
+const result = contacts
+  .map(data => {
+    const info = parse.info(data);
+
+    const result = Object.assign(
+      info,
+      connections[info.id],
+      {
+        skills: parse.skills(data),
+        positions: parse.positions(data),
+      }
+    );
+
+    return result;
   });
-}, function (err, files) {
-  console.log(err, filesPaths && filesPaths.length + ' files loaded');
 
-  console.log(files);
-});
+fs.writeFileSync('contacts.json', JSON.stringify(result));
