@@ -1,9 +1,12 @@
 'use strict';
 
-const { readFileSync: read, writeFileSync: write } = require('fs');
+const { readdir, readFileSync: read, writeFileSync: write } = require('fs');
 const qs = require('querystring');
 
-const startTimer = timer('started in').start();
+function pluck(obj/*, ...fields*/) {
+  const fields = Array.prototype.slice.call(arguments, 1);
+  return fields.reduce((r, f) => (obj[f] && (r[f] = obj[f]), r), {});
+}
 
 function timer(inLabel) {
   inLabel = `${inLabel || 'time'}`;
@@ -77,7 +80,14 @@ function httpError(code, message) {
 }
 
 function callWithReq(field, func) {
-  return (req, res) => res.send(func(req[field]));
+  return (req, res) => {
+    const result = func(req[field]);
+
+    res.format({
+      html: () => res.send(stringifyToHTML(result)),
+      default: () => res.send(result),
+    });
+  };
 }
 
 function callWithReqParams(func) {
@@ -287,7 +297,7 @@ function mapField(profiles, field, formatItems = e => e, formatItem) {
 
 function stringifyToHTML(obj) {
   if (typeof obj !== 'object') return obj ? obj.toString() : '';
-  return `<ul>${mapObject(obj, (v, k) => `<li>${k}${Array.isArray(v) ? ` (${v.length})`: ''}: ${stringifyToHTML(v)}</li>`).join('')}</ul>`;
+  return `<ul>${mapObject(obj, (v, k) => `<li>${k}${Array.isArray(v) ? ` (${v.length})`: ''}: ${k === 'href' ? `<a href="${v}">${v}</a>` : stringifyToHTML(v)}</li>`).join('')}</ul>`;
 }
 
 function stringify(obj, exclude = []) {
@@ -344,321 +354,350 @@ function filterField(arr, field, value) {
 
 const filterAndSortByCountOne = arr => filterByCountOne(sortByCountDesc(arr));
 
-const time = timer().start('profiles');
-
 // Init data
 
 function formatLine(field) {
   return (c, current = '') => s => {
     const name = encodeURIComponent(s.name);
-    return `<a href="/${field}/${name}">${s.name}</a>: <a href="/profiles?${current}${field}=${name}">${s.count} profile(s)</a> ${c ? `(${percentage(s.count / c)}%)` : ''}`;
+    return {
+      href: `/${field}/${name}`,
+      title: s.name,
+      _links: {
+        profile: {
+          href: `/profiles?${current}${field}=${name}`,
+          count: s.count,
+          percentage: c ? percentage(s.count / c) : 'N/A',
+        },
+      },
+    };
   };
 }
 
 const format = {
-  profile: p => `<a href="/profiles/${p.id}">${p.name}</a>`,
-  skill: formatLine('skills.name'),
-  company: formatLine('positions.companyName'),
-  title: formatLine('positions.title'),
+  profile: p => ({ title: p.name, href: `/profiles/${p.id}` }),
+  'skills.name': formatLine('skills.name'),
+  'positions.companyName': formatLine('positions.companyName'),
+  'positions.title': formatLine('positions.title'),
 };
 
-const profiles = require('./profiles/all.json').sort((a, b) => {
-  a = normalize(a.name);
-  b = normalize(b.name);
-  return a > b ? 1 : (a < b ? -1 : 0);
-});
-profiles.forEach(p => {
-  p.skills.sort((a, b) => (b.endorsementCount || 0) - (a.endorsementCount || 0));
-  p.positions.sort((a, b) => {
-    return b.startDate !== a.startDate ? b.startDate - a.startDate : (a.endDate || b.endDate);
+function launch(file, port) {
+  console.log(`launching '${file}' on port ${port}`);
+
+  const startTimer = timer(`${file} started in`).start();
+  const time = timer().start('profiles');
+
+  const profiles = require(`./profiles/${file}`).sort((a, b) => {
+    a = normalize(a.name);
+    b = normalize(b.name);
+    return a > b ? 1 : (a < b ? -1 : 0);
   });
-});
-
-profiles.index = index(profiles, 'id', true);
-
-time.check('mapping');
-
-function filterProfiles(profiles, field, value) {
-  const values = arrayify(value).map(normalize);
-
-  return profiles.filter(
-    p => values.filter(
-      v => get(p, field).some(s => normalize(s) === v)
-    ).length === values.length
-  );
-}
-
-
-const search = Search(profiles, ['profileUrl']);
-
-const skills = mapField(profiles, 'skills.name', unique);
-const positions = mapField(profiles, 'positions.companyName', unique);
-const titles = mapField(profiles, 'positions.title', unique);
-
-time.check('endorsers');
-
-function buildEndorsements() {
-  const endorsements = profiles.reduce(
-    (r, p) => p.skills.reduce(
-      (r, s) => s.endorsers.reduce(
-        (r, endorser) => {
-          pushIn(r.endorsers, endorser, p.id);
-
-          pushIn(r.endorsees, p.id, endorser);
-          return r;
-        }, r), r
-    ), { endorsers: {}, endorsees: {} }
-  );
-
-  return endorsements;
-}
-
-const { endorsers, endorsees } = buildEndorsements();
-
-const indices = {
-  profiles: profiles.index,
-  'name': index(profiles, 'name'),
-  'skills.name': skills.index,
-  'positions.companyName': positions.index,
-  'positions.title': titles.index,
-  endorsers,
-  endorsees,
-};
-
-time.check('network');
-
-function buildNetwork() {
-  const time = timer('network').start('all');
-
-  const allEndorsees = Object.keys(endorsees);
-  const allEndorsers = Object.keys(endorsers);
-  const all = unique(union(allEndorsees, allEndorsers, get(profiles, 'id')).map(id => +id));
-
-  time.check('map');
-
-  const networks = all.map(a => {
-    const profile = indices.profiles[a] || { id: +a };
-
-    const { id, name = '' } = profile;
-
-    const pendorsers = unique(indices.endorsees[id]);
-    const pendorsees = unique(indices.endorsers[id]);
-    const connecteds = unique(union(pendorsers, pendorsees));
-    const friends = intersection(pendorsers, pendorsees);
-
-    return { id, name, friends, endorsers: pendorsers, endorsees: pendorsees, connecteds };
+  profiles.forEach(p => {
+    p.skills.sort((a, b) => (b.endorsementCount || 0) - (a.endorsementCount || 0));
+    p.positions.sort((a, b) => {
+      return b.startDate !== a.startDate ? b.startDate - a.startDate : (a.endDate || b.endDate);
+    });
   });
 
-  time.check('index');
+  profiles.index = index(profiles, 'id', true);
 
-  networks.index = index(networks, 'id', true);
+  time.check('mapping');
 
-  time.check('intersection');
+  function filterProfiles(profiles, field, value) {
+    const values = arrayify(value).map(normalize);
 
-  networks.forEach(f => {
-    const { id, friends, connecteds } = f;
+    return profiles.filter(
+      p => values.filter(
+        v => get(p, field).some(s => normalize(s) === v)
+      ).length === values.length
+    );
+  }
 
-    const network = connecteds.filter(
-      p => intersection(networks.index[p].connecteds, connecteds).length
+
+  const search = Search(profiles, ['profileUrl']);
+
+  const maps = {
+    profiles: profiles,
+    'skills.name': mapField(profiles, 'skills.name', unique),
+    'positions.companyName': mapField(profiles, 'positions.companyName', unique),
+    'positions.title': mapField(profiles, 'positions.title', unique),
+  };
+
+  time.check('endorsers');
+
+  function buildEndorsements() {
+    const endorsements = profiles.reduce(
+      (r, p) => p.skills.reduce(
+        (r, s) => s.endorsers.reduce(
+          (r, endorser) => {
+            pushIn(r.endorsers, endorser, p.id);
+
+            pushIn(r.endorsees, p.id, endorser);
+            return r;
+          }, r), r
+      ), { endorsers: {}, endorsees: {} }
     );
 
-    f.network = network;
-  });
+    return endorsements;
+  }
 
-  time.check('sort');
+  const { endorsers, endorsees } = buildEndorsements();
 
-  networks.sort((a, b) => compareInts(b.network.length, a.network.length));
+  const indices = {
+    profiles: profiles.index,
+    name: index(profiles, 'name'),
+    'skills.name': maps['skills.name'].index,
+    'positions.companyName': maps['positions.companyName'].index,
+    'positions.title': maps['positions.title'].index,
+    endorsers,
+    endorsees,
+  };
 
-  time.check();
+  time.check('network');
 
-  return networks;
-}
+  function buildNetwork() {
+    const time = timer('network').start('all');
 
-const networks = buildNetwork();
+    const allEndorsees = Object.keys(endorsees);
+    const allEndorsers = Object.keys(endorsers);
+    const all = unique(union(allEndorsees, allEndorsers, get(profiles, 'id')).map(id => +id));
 
-indices.networks = networks.index;
+    time.check('map');
 
-time.check('skillsMatrice');
+    const networks = all.map(a => {
+      const profile = indices.profiles[a] || { id: +a };
 
-function buildSkillsMatrice() {
-  const time = timer('skillsMatrice').start('map');
+      const { id, name = '' } = profile;
 
-  const keys = get(filterAndSortByCountOne(skills), 'name');
+      const pendorsers = unique(indices.endorsees[id]);
+      const pendorsees = unique(indices.endorsers[id]);
+      const connecteds = unique(union(pendorsers, pendorsees));
+      const friends = intersection(pendorsers, pendorsees);
 
-  const skillsMap = keys.map(name => ({
-    name,
-    items: flatMap(get(indices['skills.name'][name], 'skills.name'), e => e.map(normalize)),
-  }));
+      return { id, name, friends, endorsers: pendorsers, endorsees: pendorsees, connecteds };
+    });
 
-  time.check('add reduce');
+    time.check('index');
 
-  const skillsMatrice = skillsMap.reduce(
-    (r, { name: s1, items }) => {
-      const skills = {};
-      const top = { name: '', count: 0 };
-      const rs1 = r[s1] = { skills, top };
+    networks.index = index(networks, 'id', true);
 
-      return items.reduce((r, s2) => {
-        if (s1 === s2) return r;
-        const rs2 = (skills[s2] || 0) + 1;
+    time.check('intersection');
 
-        skills[s2] = rs2;
+    networks.forEach(f => {
+      const { id, friends, connecteds } = f;
 
-        if (rs2 > top.count) {
-          top.count = rs2;
-          if (s2 !== top.name) {
-            top.name = s2;
+      const network = connecteds.filter(
+        p => intersection(networks.index[p].connecteds, connecteds).length
+      );
+
+      f.network = network;
+    });
+
+    time.check('sort');
+
+    networks.sort((a, b) => compareInts(b.network.length, a.network.length));
+
+    time.check();
+
+    return networks;
+  }
+
+  const networks = buildNetwork();
+
+  indices.networks = networks.index;
+
+  time.check('skillsMatrice');
+
+  function buildSkillsMatrice() {
+    const time = timer('skillsMatrice').start('map');
+
+    const keys = get(filterAndSortByCountOne(maps['skills.name']), 'name');
+
+    const skillsMap = keys.map(name => ({
+      name,
+      items: flatMap(get(indices['skills.name'][name], 'skills.name'), e => e.map(normalize)),
+    }));
+
+    time.check('add reduce');
+
+    const skillsMatrice = skillsMap.reduce(
+      (r, { name: s1, items }) => {
+        const skills = {};
+        const top = { name: '', count: 0 };
+        const rs1 = r[s1] = { skills, top };
+
+        return items.reduce((r, s2) => {
+          if (s1 === s2) return r;
+          const rs2 = (skills[s2] || 0) + 1;
+
+          skills[s2] = rs2;
+
+          if (rs2 > top.count) {
+            top.count = rs2;
+            if (s2 !== top.name) {
+              top.name = s2;
+            }
           }
+          return r;
+        }, r);
+      },
+      {}
+    );
+
+    time.check('top map');
+
+    const tops = keys.map(name => ({
+      name,
+      top: skillsMatrice[name].top.name,
+    }));
+
+    time.check('invert');
+
+    const topSkillsIndex = indexObject(
+      index(tops, 'name', true, 'top')
+    );
+
+    time.check('keys');
+
+    keys.forEach(name => {
+      const matrice = skillsMatrice[name];
+      matrice.keys = Object.keys(matrice.skills);
+    });
+
+    time.check();
+
+    return { skillsMatrice, topSkillsIndex };
+  }
+
+  const { skillsMatrice, topSkillsIndex } = buildSkillsMatrice();
+
+  indices.skillsMatrice = skillsMatrice;
+  indices.topSkills = topSkillsIndex;
+
+  time.check('skillsMap');
+
+  // App setup
+
+  const express = require('express');
+  const bodyParser = require('body-parser');
+  const morgan = require('morgan');
+
+  const app = express();
+
+  function formatProfileIds(ids, func) {
+    if (!ids) return [];
+
+    return [
+      ...ids
+        .filter(e => indices.profiles[e])
+        .map(e => indices.profiles[e])
+        .sort((a, e) => compareStrings(e.name, a.name))
+        .map(func || format.profile),
+      ...ids.filter(e => !indices.profiles[e]).sort(compareInts)
+    ];
+  }
+
+  function formatProfile(profile) {
+    const { id, name } = profile;
+    return name ? `${id}: ${name}` : id;
+  }
+
+  function getProfiles(query) {
+    let results = profiles;
+    results.forEach(p => delete p.matches);
+
+    if (query.q) {
+      query = mergeQueries(query, parseQuery(query.q));
+
+      query.q = query.q.map(normalize);
+
+      results = search(query.q).map(i => indices.profiles[i]);
+    }
+
+    if (query.name) {
+      query.name = normalize(query.name);
+      results = results.filter(p => normalize(p.name).includes(query.name));
+    }
+
+    if (query['skills.name']) {
+      const skillName = unique(flatMap(
+        arrayify(query['skills.name']),
+        e => e.split(',')
+      ));
+
+      query['skills.name'] = skillName;
+
+      results = filterProfiles(results, 'skills.name', skillName);
+
+      const skills = skillName.map(normalize);
+
+      results.forEach(p => {
+        p.matches = {};
+
+        if (!p.matches['skills.name']) {
+          p.matches['skills.name'] = skills.map(v => p.skills.find(s => normalize(s.name) === v));
         }
-        return r;
-      }, r);
-    },
-    {}
-  );
+      });
 
-  time.check('top map');
+      results = results.sort((a, b) => {
+        return b.matches['skills.name'].reduce((r, p, i) => {
+          if (r !== null) return r;
+          const diff = (p.endorsementCount || 0) - (a.matches['skills.name'][i].endorsementCount || 0);
+          return diff !== 0 ? diff : null;
+        }, null);
+      });
+    }
 
-  const tops = keys.map(name => ({
-    name,
-    top: skillsMatrice[name].top.name,
-  }));
+    if (query['positions.companyName']) {
+      const companyName = query['positions.companyName'];
+      results = filterProfiles(results, 'positions.companyName', companyName);
+    }
 
-  time.check('invert');
+    if (query['positions.title']) {
+      const title = query['positions.title'];
+      results = filterProfiles(results, 'positions.title', title);
+    }
 
-  const topSkillsIndex = indexObject(
-    index(tops, 'name', true, 'top')
-  );
-
-  time.check('keys');
-
-  keys.forEach(name => {
-    const matrice = skillsMatrice[name];
-    matrice.keys = Object.keys(matrice.skills);
-  });
-
-  time.check();
-
-  return { skillsMatrice, topSkillsIndex };
-}
-
-const { skillsMatrice, topSkillsIndex } = buildSkillsMatrice();
-
-indices.skillsMatrice = skillsMatrice;
-indices.topSkills = topSkillsIndex;
-
-time.check('skillsMap');
-
-// App setup
-
-const express = require('express');
-const bodyParser = require('body-parser');
-const morgan = require('morgan');
-
-const app = express();
-
-function formatProfileIds(ids, func) {
-  if (!ids) return [];
-
-  return [
-    ...ids
-      .filter(e => indices.profiles[e])
-      .map(e => indices.profiles[e])
-      .sort((a, e) => compareStrings(e.name, a.name))
-      .map(func || format.profile),
-    ...ids.filter(e => !indices.profiles[e]).sort(compareInts)
-  ];
-}
-
-function formatProfile(profile) {
-  const { id, name } = profile;
-  return name ? `${id}: ${name}` : id;
-}
-
-function getProfiles(query) {
-  let results = profiles;
-  results.forEach(p => delete p.filtered);
-
-  if (query.q) {
-    query = mergeQueries(query, parseQuery(query.q));
-
-    query.q = query.q.map(normalize);
-
-    results = search(query.q).map(i => indices.profiles[i]);
+    return Object.assign({
+      count: results.length,
+    }, {
+      _embedded: {
+        profile: results.map(({ id, name, matches }) => Object.assign({
+          href: `/profiles/${id}`,
+          title: name,
+        }, matches ? {
+          matches: reduceObject(matches, (r, values, key) => {
+            r[key] = values.map(v => pluck(v, 'name', 'endorsementCount'));
+            return r;
+          }, {}),
+        } : {})),
+      },
+    }, query.q ? {
+      _templates: {
+        default: {
+          title: 'Save search as',
+          method: 'post',
+          action: '/save',
+          properties: [
+            { name: 'table', type: 'hidden', value: 'search' },
+            { name: 'key', type: 'text' },
+            { name: 'value', type: 'hidden', value: JSON.stringify(query) },
+          ],
+        },
+      },
+    } : {});
   }
 
-  if (query.name) {
-    query.name = normalize(query.name);
-    results = results.filter(p => normalize(p.name).includes(query.name));
-  }
+  function getProfile({ id }) {
+    const profile = indices.profiles[id];
+    if (!profile) return res.status(404).send();
 
-  if (query['skills.name']) {
-    const skillName = unique(flatMap(
-      arrayify(query['skills.name']),
-      e => e.split(',')
-    ));
+    const { friends, endorsees, endorsers, network } = networks.index[id];
 
-    query['skills.name'] = skillName;
+    let result = JSON.parse(JSON.stringify(profile));
 
-    results = filterProfiles(results, 'skills.name', skillName);
+    const { positions, skills, profileUrl } = result;
 
-    const skills = skillName.map(normalize);
-
-    results.forEach(p => {
-      p.filtered = {};
-
-      if (!p.filtered['skills.name']) {
-        p.filtered['skills.name'] = skills.map(v => p.skills.find(s => normalize(s.name) === v));
-      }
-    });
-
-    results = results.sort((a, b) => {
-      return b.filtered['skills.name'].reduce((r, p, i) => {
-        if (r !== null) return r;
-        const diff = (p.endorsementCount || 0) - (a.filtered['skills.name'][i].endorsementCount || 0);
-        return diff !== 0 ? diff : null;
-      }, null);
-    });
-  }
-
-  if (query['positions.companyName']) {
-    const companyName = query['positions.companyName'];
-    results = filterProfiles(results, 'positions.companyName', companyName);
-  }
-
-  if (query['positions.title']) {
-    const title = query['positions.title'];
-    results = filterProfiles(results, 'positions.title', title);
-  }
-
-  const resultsHTML = results.map(p => `<li>${format.profile(p)} ${p.filtered ?
- `(${p.filtered['skills.name'].map(f => `${f.name}: ${f.endorsementCount || 'N/A'}`).join(', ')})` :
-''
-}</li>`);
-
-  return [
-    `total profiles: ${results.length}`,
-    query.q ? `Save search as
-<form action="/save" method="POST">
-<input type="hidden" name="table" value="search"/>
-<input type="text" name="key"/>
-<input type="hidden" name="value" value="${encodeURIComponent(JSON.stringify(query))}"/>
-<input type="submit" value="OK"/>
-</form>` : '',
-    resultsHTML.join('')
-  ].join('<hr/>');
-}
-
-function getProfile({ id }) {
-  const profile = indices.profiles[id];
-  if (!profile) return res.status(404).send();
-
-  const { friends, endorsees, endorsers, network } = networks.index[id];
-
-  let result = JSON.parse(JSON.stringify(profile));
-
-  result = closure(
-    result,
-    ({ positions, skills, profileUrl, }) => Object.assign({
+    return Object.assign({
       id,
       seniority: closure(
         positions.reduce((r, p) => (p.startDate || 0) < (r.startDate || 0) ? p : r),
@@ -667,9 +706,11 @@ function getProfile({ id }) {
           'N/A'
       )
     }, result, {
-      profileUrl: `<a href="${profileUrl}" target=_blank>LinkedIn</a>`,
+      profileUrl,
       skills: skills.map(s => {
-        s.name = `<a href="/skills.name/${encodeURIComponent(normalize(s.name))}">${s.name}</a>`;
+        s._links = {
+          'skills.name': { href: `/skills.name/${encodeURIComponent(normalize(s.name))}` },
+        };
         if (s.endorsers && s.endorsers.length) s.endorsers = formatProfileIds(s.endorsers);
         else delete s.endorsers;
         return s;
@@ -677,437 +718,389 @@ function getProfile({ id }) {
       positions: positions.map(s => {
         if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
         if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
-        s.companyName = `<a href="/positions.companyName/${encodeURIComponent(normalize(s.companyName))}">${s.companyName}</a>`;
-        s.title = `<a href="/positions.title/${encodeURIComponent(normalize(s.title))}">${s.title}</a>`;
+        s._links = {
+          'positions.companyName': {
+            title: s.companyName,
+            href: `/positions.companyName/${encodeURIComponent(normalize(s.companyName))}`,
+          },
+          'positions.title': {
+            title: s.title,
+            href: `/positions.title/${encodeURIComponent(normalize(s.title))}`,
+          },
+        }
         return s;
       }),
       friends: formatProfileIds(friends),
       endorsed: formatProfileIds(endorsees),
       endorsers: formatProfileIds(endorsers),
       network: formatProfileIds(network),
-    })
-  );
-
-  return stringifyToHTML(result) + `<code>${JSON.stringify(result)}</code>`;
-}
-
-function getProfileMap({ id }) {
-  const profile = indices.profiles[id];
-  if (!profile) return res.status(404).send();
-
-  const { name } = profile;
-
-  const { friends, endorsees, endorsers, connecteds, network } = networks.index[id];
-
-  const ndir = intersection(
-    connecteds,
-    flatMap(connecteds, p => indices.networks[p].connecteds)
-  ).concat(connecteds).sort();
-
-  const inter = sortByCountDesc(mapField(ndir, null));
-
-  return {
-    id,
-    name,
-    endorsers: formatProfileIds(endorsers, formatProfile),
-    endorsees: formatProfileIds(endorsees, formatProfile),
-    connecteds: formatProfileIds(connecteds, formatProfile),
-    friends: formatProfileIds(friends, formatProfile),
-    network: formatProfileIds(network, formatProfile),
-    ndir: formatProfileIds(ndir, formatProfile),
-    inter,
-  };
-}
-
-function getProfilesMap({ sort, size = 10 }) {
-  let results = networks.slice();
-  if (sort) {
-    const reverse = sort.match(/^-/);
-    const field = reverse ? sort.slice(1) : sort;
-    results.sort((a, b) => closure(
-      get(a, field),
-      get(b, field),
-      (a, b) =>
-        (reverse ? -1 : 1) *
-        (Number.isInteger(a - b) ?
-         compareInts(b, a) :
-         compareStrings(b, a))
-    ));
-  }
-  return results.slice(0, size);
-}
-
-function getSkills({ q }) {
-  let results = skills;
-
-  if (q) {
-    q = normalize(q);
-    results = results.filter(s => s.name.includes(q));
-  }
-
-  return `total skills: ${results.length}<hr/><ul><li>` +
-    sortByCountDesc(results).map(format.skill(results.length)).join('</li><li>') +
-    '</li></ul>';
-}
-
-function getCompanyNames({ q }) {
-  let results = positions;
-
-  if (q) {
-    q = normalize(q);
-    results = results.filter(s => s.name.includes(q));
-  }
-
-  return `total companies: ${results.length}<hr/><ul><li>` +
-    sortByCountDesc(results).map(format.company(results.length)).join('</li><li>') +
-    '</li></ul>';
-}
-
-function getTitles({ q }) {
-  let results = titles;
-
-  if (q) {
-    q = normalize(q);
-    results = results.filter(t => t.name.includes(q));
-  }
-
-  return `total titles: ${results.length}<hr/>` +
-    sortByCountDesc(results).map(format.title(results.length)).join('<br/>');
-}
-
-function getSkillRelatedSkillsMap({ skill }) {
-  const matrice = indices.skillsMatrice[skill];
-  if (!matrice) return [];
-
-  return matrice.keys
-    .sort((a, b) =>
-          indices.skillsMatrice[skill].skills[b] -
-          indices.skillsMatrice[skill].skills[a])
-    .map(name => {
-      const count = indices.skillsMatrice[skill].skills[name];
-      return { name, count };
     });
-}
 
-function getSkillRelatedSkills({ skill }) {
-  const related = getSkillRelatedSkillsMap({ skill });
+    return result;
+  }
 
-  return related.map(({ name, count }) => {
-    const relatedCount = indices['skills.name'][name].length;
-    return `${name} (${count}/${relatedCount}, ${percentage(count / relatedCount)}%)`;
-  });
-}
+  function getProfileMap({ id }) {
+    const profile = indices.profiles[id];
+    if (!profile) return res.status(404).send();
 
-function getSkillTopSkills({ skill }) {
-  const topSkills = indices.topSkills[skill];
-  if (!topSkills) return [];
+    const { name } = profile;
 
-  return topSkills
-    .sort((a, b) =>
-          indices.skillsMatrice[skill].skills[b] -
-          indices.skillsMatrice[skill].skills[a])
-    .map(name => {
-      const count = indices.skillsMatrice[skill].skills[name];
-      const topCount = indices['skills.name'][name].length;
-      return `${name} (${count}/${topCount}, ${percentage(count / topCount)}%)`;
+    const { friends, endorsees, endorsers, connecteds, network } = networks.index[id];
+
+    const ndir = intersection(
+      connecteds,
+      flatMap(connecteds, p => indices.networks[p].connecteds)
+    ).concat(connecteds).sort();
+
+    const inter = sortByCountDesc(mapField(ndir, null));
+
+    return {
+      id,
+      name,
+      endorsers: formatProfileIds(endorsers, formatProfile),
+      endorsees: formatProfileIds(endorsees, formatProfile),
+      connecteds: formatProfileIds(connecteds, formatProfile),
+      friends: formatProfileIds(friends, formatProfile),
+      network: formatProfileIds(network, formatProfile),
+      ndir: formatProfileIds(ndir, formatProfile),
+      inter,
+    };
+  }
+
+  function getProfilesMap({ sort, size = 10 }) {
+    let results = networks.slice();
+    if (sort) {
+      const reverse = sort.match(/^-/);
+      const field = reverse ? sort.slice(1) : sort;
+      results.sort((a, b) => closure(
+        get(a, field),
+        get(b, field),
+        (a, b) =>
+          (reverse ? -1 : 1) *
+          (Number.isInteger(a - b) ?
+           compareInts(b, a) :
+           compareStrings(b, a))
+      ));
+    }
+    return results.slice(0, size);
+  }
+
+  function getMapCollection(collection) {
+    return ({ q }) => {
+      let results = maps[collection];
+
+      if (q) {
+        q = normalize(q);
+        results = results.filter(t => t.name.includes(q));
+      }
+
+      const total = maps[collection].length;
+      const count = results.length;
+
+      return Object.assign({
+        total,
+      }, count !== total ? {
+        count,
+        percentage: percentage(count / total),
+      } : {}, {
+        _embedded: {
+          [collection]: sortByCountDesc(results).map(format[collection](count)),
+        },
+      });
+    };
+  }
+
+  function getMapCollectionItem(collection) {
+    return ({ name }) => {
+      name = normalize(name);
+
+      const profiles = indices[collection][name];
+      if (!profiles) throw httpError(404, `No such ${collection}`);
+
+      const count = profiles.length;
+      if (!count) return 'No results';
+
+      const current = `${collection}=${name}&`;
+
+      const items = {
+        'skills.name': collection === 'skills.name' ?
+            getSkillRelatedSkillsMap({ name }) : mapField(profiles, 'skills.name', unique),
+        'positions.companyName': mapField(profiles, 'positions.companyName', unique),
+        'positions.title': mapField(profiles, 'positions.title', unique),
+      };
+
+      return {
+        name,
+        _links: {
+          profile: {
+            href: `/profiles?${collection}=${encodeURIComponent(name)}`,
+            count,
+          },
+        },
+        _embedded: reduceObject(items, (r, items, collection) => {
+          r[collection] = sortByCountDesc(items).map(format[collection](count, current));
+          return r;
+        }, {}),
+      };
+    };
+  }
+
+  function getSkillRelatedSkillsMap({ name }) {
+    const matrice = indices.skillsMatrice[name];
+    if (!matrice) return [];
+
+    return matrice.keys
+      .sort((a, b) =>
+            indices.skillsMatrice[name].skills[b] -
+            indices.skillsMatrice[name].skills[a])
+      .map(child => {
+        const count = indices.skillsMatrice[name].skills[child];
+        return { name: child, count };
+      });
+  }
+
+  function getSkillRelatedSkills({ name }) {
+    const related = getSkillRelatedSkillsMap({ name });
+
+    return related.map(({ name, count }) => {
+      const relatedCount = indices['skills.name'][name].length;
+      return `${name} (${count}/${relatedCount}, ${percentage(count / relatedCount)}%)`;
     });
-}
+  }
 
-function getTopSkills() {
-  const topSkills = filterAndSortByCountOne(
-    mapField(
-      flatMap(
-        Object.keys(indices.skillsMatrice),
+  function getSkillTopSkills({ name }) {
+    const topSkills = indices.topSkills[name];
+    if (!topSkills) return [];
+
+    return topSkills
+      .sort((a, b) =>
+            indices.skillsMatrice[name].skills[b] -
+            indices.skillsMatrice[name].skills[a])
+      .map(child => {
+        const count = indices.skillsMatrice[name].skills[child];
+        const childCount = indices['skills.name'][child].length;
+        return `${child} (${count}/${childCount}, ${percentage(count / childCount)}%)`;
+      });
+  }
+
+  function getTopSkills() {
+    const topSkills = filterAndSortByCountOne(
+      mapField(
+        flatMap(
+          Object.keys(indices.skillsMatrice),
+          skill => {
+            const matrice = indices.skillsMatrice[skill];
+            const skills = Object.keys(matrice.skills);
+            return skills;
+          }
+        ),
+        null,
+        e => null
+      )
+    );
+
+    return index(topSkills, 'name', true, e => e.count);
+  }
+
+  function getTopSkillsN2({ c = 2 }) {
+    const topSkills = reduceObject(indices.skillsMatrice, (r, matrice, name) => {
+      const topRelated = flatMap(
+        matrice.keys.filter(key => matrice.skills[key] > c),
         skill => {
-          const matrice = indices.skillsMatrice[skill];
-          const skills = Object.keys(matrice.skills);
-          return skills;
+          const skillMatrice = indices.skillsMatrice[skill];
+          if (!skillMatrice) return false;
+
+          return skillMatrice.keys.filter(key => matrice.skills[key] > c);
         }
-      ),
-      null,
-      e => null
-    )
-  );
+      );
 
-  return index(topSkills, 'name', true, e => e.count);
-}
+      const items = unique(topRelated).filter(e => e);
 
-function getTopSkillsN2({ c = 2 }) {
-  const topSkills = reduceObject(indices.skillsMatrice, (r, matrice, name) => {
-    const topRelated = flatMap(
-      matrice.keys.filter(key => matrice.skills[key] > c),
-      skill => {
-        const skillMatrice = indices.skillsMatrice[skill];
-        if (!skillMatrice) return false;
+      if (items.length) {
+        r.push({ name, items });
+      }
 
-        return skillMatrice.keys.filter(key => matrice.skills[key] > c);
+      return r;
+    }, []);
+
+    return topSkills;
+  }
+
+  function getSearches() {
+    const file = `./data/search.json`;
+
+    let content;
+    try {
+      content = JSON.parse(read(file));
+    } catch (e) {
+      content = {};
+    }
+    return mapObject(content, (value, key) => ({
+      key,
+      value: decodeURIComponent(value),
+    }));
+  }
+
+  function getSuggest({ q }) {
+    q = normalize(q);
+
+    const searches = getSearches();
+
+    const counts = profiles.reduce(
+      (r, p) => {
+        r.name += normalize(p.name).includes(q);
+        r['skills.name'] += p.skills.some(e => normalize(e.name).includes(q));
+        r['positions.title'] += p.positions.some(e => normalize(e.title).includes(q));
+        r['positions.companyName'] += p.positions.some(e => normalize(e.companyName).includes(q));
+        return r;
+      },
+      {
+        q: 0,
+        name: 0,
+        'skills.name': 0,
+        'positions.title': 0,
+        'positions.companyName': 0,
       }
     );
 
-    const items = unique(topRelated).filter(e => e);
+    const getFieldCount = f => counts[f];
 
-    if (items.length) {
-      r.push({ name, items });
-    }
+    const fields = sortWith(Object.keys(counts).filter(getFieldCount), getFieldCount, true);
 
-    return r;
-  }, []);
+    const result = fields.reduce(
+      (r, field) => {
+        r.results[field] = { href: `/profiles?${field}=${q}`, count: counts[field] };
 
-  return topSkills;
-}
+        const p = indices[field][q];
+        if (p) {
+          r.matches[field] = field === 'name' ?
+            p.map(p => ({ href: `/profiles/${p.id}`, count: p.name })) :
+          { href: `/${field}/${q}` };
+        }
+        return r;
+      },
+      { results: {}, matches: {} }
+    );
 
-function getCommonSkills({ index }) {
-  const all = get(skills, 'name').sort();
-
-  const pskills = profiles.map(
-    p => unique(get(p, 'skills.name').map(normalize))
-      .map(s => index ? all.indexOf(s) : s)
-      .sort(compareInts)
-  );
-
-  const stats = pskills.reduce((r, s) => {
-    const { length } = s;
-
-    r.mean += length;
-    r.max = Math.max(r.max, length);
-    r.min = Math.min(r.min, length);
-    return r;
-  }, { mean: 0, max: 0, min: 0 });
-
-  console.log(stats.mean / pskills.length);
-  console.log(`max: ${stats.max}`);
-  console.log(`min: ${stats.min}`);
-
-  return pskills;
-}
-
-function getSkill({ skill }) {
-  const items = indices['skills.name'][skill];
-  if (!items) throw httpError(404, 'No such skill name');
-  if (!items.length) return 'No result';
-
-  const current = `skills.name=${skill}&`;
-
-  const skills = filterAndSortByCountOne(getSkillRelatedSkillsMap({ skill }));
-
-  const count = items.length;
-  const skillHTML = `${skill}: <a href="/profiles?skills.name=${encodeURIComponent(skill)}">${count} profile(s)</a>`;
-  const relatedSkills = '<details><summary>related skills:</summary><ul><li>' +
-          skills.map(format.skill(count, current)).join('</li><li>') +
-          '</li></ul></details>';
-
-  const companies = filterAndSortByCountOne(mapField(items, 'positions.companyName', unique));
-  const relatedCompanies = '<details><summary>related companies:</summary><ul><li>' +
-          companies.map(format.company(count, current)).join('</li><li>') +
-          '</li></ul></details>';
-
-  return [skillHTML, relatedSkills, relatedCompanies].join('<hr/><hr/>');
-}
-
-function getCompanyName({ companyName }) {
-  const items = indices['positions.companyName'][companyName];
-  if (!items) throw httpError(404, 'No such skill name');
-  if (!items.length) return 'No result';
-
-  const current = `positions.companyName=${companyName}&`;
-
-  const companyNames = filterAndSortByCountOne(mapField(items, 'positions.companyName', unique));
-
-  const count = items.length;
-  const companyHTML = `${companyName}: ${count}`;
-  const relatedCompanyNames = 'related companies:<hr/><ul><li>' +
-          companyNames.slice(1).map(format.company(count, current)).join('</li><li>') +
-          '</li></ul>';
-
-  const skills = filterAndSortByCountOne(mapField(items, 'skills.name', unique));
-  const relatedSkills = 'related skills:<hr/><ul><li>' +
-          skills.map(format.skill(count, current)).join('</li><li>') +
-          '</li></ul>';
-
-  return [companyHTML, relatedCompanyNames, relatedSkills].join('<hr/><hr/>');
-}
-
-function getTitle({ title }) {
-  const items = indices['positions.title'][title];
-  if (!items) return httpError(404, 'No such title');
-  if (!items.length) return 'No result';
-
-  const current = `positions.title=${title}&`;
-
-  const titles = filterAndSortByCountOne(mapField(items, 'positions.title', unique));
-
-  const count = items.length;
-  const titleHTML = `${title}: ${count}`;
-  const relatedTitles = 'related titles:<hr/>' +
-          titles.slice(1).map(format.title(count, current)).join('<br/>');
-
-  const skills = filterAndSortByCountOne(mapField(items, 'skills.name', unique));
-  const relatedSkills = 'related skills:<hr/><ul><li>' +
-          skills.map(format.skill(count, current)).join('</li><li>') +
-          '</li></ul>';
-
-  return [titleHTML, relatedTitles, relatedSkills].join('<hr/><hr/>');
-}
-
-function getSearches() {
-  const file = `./data/search.json`;
-
-  let content;
-  try {
-    content = JSON.parse(read(file));
-  } catch (e) {
-    content = {};
-  }
-  return mapObject(content, (value, key) => ({
-    key,
-    value: decodeURIComponent(value),
-  }));
-}
-
-function getSuggest({ q }) {
-  q = normalize(q);
-
-  const searches = getSearches();
-
-  const counts = profiles.reduce(
-    (r, p) => {
-      r.name += normalize(p.name).includes(q);
-      r['skills.name'] += p.skills.some(e => normalize(e.name).includes(q));
-      r['positions.title'] += p.positions.some(e => normalize(e.title).includes(q));
-      r['positions.companyName'] += p.positions.some(e => normalize(e.companyName).includes(q));
-      return r;
-    },
-    {
-      q: 0,
-      name: 0,
-      'skills.name': 0,
-      'positions.title': 0,
-      'positions.companyName': 0,
-    }
-  );
-
-  const getFieldCount = f => counts[f];
-
-  const fields = sortWith(Object.keys(counts).filter(getFieldCount), getFieldCount, true);
-
-  const result = fields.reduce(
-    (r, field) => {
-      r.results[field] = `<a href="/profiles?${field}=${q}">(${counts[field]})</a>`;
-
-      const p = indices[field][q];
-      if (p) {
-        r.matches[field] = field === 'name' ?
-          (p.length > 1 ? '<ul><li>' : '') +
-          p.map(p => `<a href="/profiles/${p.id}">${p.name}</a>`).join('</li><li>') +
-          (p.length > 1 ? '</li></ul>' : '') :
-        `<a href="/${field}/${q}">${q}</a>`;
+    const sresults = searches.reduce((r, { value, key }) => {
+      if (value.includes(q) || normalize(key).includes(q)) {
+        value = JSON.parse(value);
+        r.push({ title: key, href: `/profiles?${qs.stringify(value)}` });
       }
       return r;
+    }, []);
+
+    return {
+      'saved searches': sresults,
+      'exact matches': result.matches,
+      'profiles matches': result.results,
+    };
+  }
+
+  function saveSomething(body) {
+    const { table, key, value } = body;
+    if (!table || !key || !value) throw httpError(400, 'missing parameters');
+
+    const file = `./data/${normalize(table)}.json`;
+
+    let content;
+    try {
+      content = JSON.parse(read(file));
+    } catch (e) {
+      content = {};
+    }
+
+    content[key] = value;
+
+    write(file, JSON.stringify(content));
+
+    return 'ok';
+  }
+
+  function inspect({ variable, field }) {
+    return { [field]: get(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
+  }
+
+  app.use(morgan('[:date[iso]] :method :url :status :response-time ms - :res[content-length]'));
+  app.use(bodyParser.json());
+  app.use(bodyParser.urlencoded({ extended: false }));
+  //  app.use(cache());
+  app.use(liveReload());
+
+  const routes = [];
+
+  closure(
+    (route, ...middlewares) => {
+      routes.push(route);
+      return app.get(route, ...middlewares);
     },
-    { results: {}, matches: {} }
+    get => {
+      get('/', function getIndex(req, res) {
+        return res.format({
+          json: () => res.send({
+            _links: routes.reduce((r, route) => {
+              r[route.slice(1) || 'index'] = { href: route };
+              return r;
+            }, {}),
+          }),
+          html: () => res.send(`
+loaded base: ${file}<hr/>
+${mapObject(maps, (items, key) => `total <a href="/${key}">${key}</a>: ${items.length}</a>`).join('<br/>')}<hr/>
+routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>')}
+`),
+        });
+      });
+
+      get('/livereload', () => {});
+      get('/profiles', callWithReqQuery(getProfiles));
+      get('/profiles/:id', callWithReqParams(getProfile));
+      get('/profiles/:id/map', callWithReqQuery(getProfileMap));
+      get('/profilesMap', callWithReqQuery(getProfilesMap));
+
+      get('/skills.name', callWithReqQuery(getMapCollection('skills.name')));
+      get('/positions.companyName', callWithReqQuery(getMapCollection('positions.companyName')));
+      get('/positions.title', callWithReqQuery(getMapCollection('positions.title')));
+
+      get('/skills.name/:name', callWithReqParams(getMapCollectionItem('skills.name')));
+      get('/skills.name/:name/related', callWithReqParams(getSkillRelatedSkills));
+      get('/skills.name/:name/top', callWithReqParams(getSkillTopSkills));
+
+      get('/topSkills', callWithReqQuery(getTopSkills));
+      get('/topSkillsN2', callWithReqQuery(getTopSkillsN2));
+
+      get('/positions.companyName/:name', callWithReqParams(getMapCollectionItem('positions.companyName')));
+      get('/positions.title/:name', callWithReqParams(getMapCollectionItem('positions.title')));
+
+      get('/suggest/:q', callWithReqParams(getSuggest));
+      get('/savedSearches', callWithReqQuery(getSearches));
+      app.post('/save', callWithReqBody(saveSomething));
+
+      app.get('/inspect/:variable/:field', callWithReqParams(inspect));
+      app.get('/stats', (req, res) => res.send(process.memoryUsage()));
+    }
   );
 
-  const sresults = searches.reduce((r, { value, key }) => {
-    if (value.includes(q) || normalize(key).includes(q)) {
-      value = JSON.parse(value);
-      r.push(`${key}: <a href="/profiles?${qs.stringify(value)}">${stringify(value)}</a>`);
-    }
-    return r;
-  }, []);
-
-  result.searches = (sresults.length) ? '<ul><li>' + sresults.join('</li><li>') + '</li></ul>' : '';
-
-  return [
-    'saved searches:<br/>' + result.searches,
-    'exact matches:<br/>' + stringifyToHTML(result.matches),
-    'profiles matches:<br/>' + stringifyToHTML(result.results)
-  ].join('<hr/>');
-}
-
-function saveSomething(body) {
-  const { table, key, value } = body;
-  if (!table || !key || !value) throw httpError(400, 'missing parameters');
-
-  const file = `./data/${normalize(table)}.json`;
-
-  let content;
-  try {
-    content = JSON.parse(read(file));
-  } catch (e) {
-    content = {};
-  }
-
-  content[key] = value;
-
-  write(file, JSON.stringify(content));
-
-  return 'ok';
-}
-
-function inspect({ variable, field }) {
-  return { [field]: get(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
-}
-
-app.use(morgan('[:date[iso]] :method :url :status :response-time ms - :res[content-length]'));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(cache());
-app.use(liveReload());
-
-const routes = [];
-
-closure(
-  (route, ...middlewares) => {
-    routes.push(route);
-    return app.get(route, ...middlewares);
-  },
-  get => {
-    get('/', function getIndex(req, res) {
-      return res.send(`
-total <a href="/profiles">profiles</a>: ${profiles.length}<br/>
-total <a href="/skills.name">skills</a>: ${skills.length}<br/>
-total <a href="/positions.companyName">companies</a>: ${positions.length}<br/>
-total <a href="/positions.title">titles</a>: ${titles.length}<hr/>
-routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>')}
-`);
-    });
-
-    get('/livereload', () => {});
-    get('/profiles', callWithReqQuery(getProfiles));
-    get('/profiles/:id', callWithReqParams(getProfile));
-    get('/profiles/:id/map', callWithReqQuery(getProfileMap));
-    get('/profilesMap', callWithReqQuery(getProfilesMap));
-
-    get('/skills.name', callWithReqQuery(getSkills));
-    get('/positions.companyName', callWithReqQuery(getCompanyNames));
-    get('/positions.title', callWithReqQuery(getTitles));
-
-    get('/skills.name/:skill', callWithReqParams(getSkill));
-    get('/skills.name/:skill/related', callWithReqParams(getSkillRelatedSkills));
-    get('/skills.name/:skill/top', callWithReqParams(getSkillTopSkills));
-
-    get('/topSkills', callWithReqQuery(getTopSkills));
-    get('/topSkillsN2', callWithReqQuery(getTopSkillsN2));
-    get('/commonSkills', callWithReqQuery(getCommonSkills));
-
-    get('/positions.companyName/:companyName', callWithReqParams(getCompanyName));
-    get('/positions.title/:title', callWithReqParams(getTitle));
-
-    get('/suggest/:q', callWithReqParams(getSuggest));
-    get('/savedSearches', callWithReqQuery(getSearches));
-    app.post('/save', callWithReqBody(saveSomething));
-
-    app.get('/inspect/:variable/:field', callWithReqParams(inspect));
-    app.get('/stats', (req, res) => res.send(process.memoryUsage()));
-  }
-);
-
-app.use((err, req, res, next) => res.status(err.code || 500).send(`
+  app.use((err, req, res, next) => res.status(err.code || 500).send(`
 ${err.message}<hr/>
 <code>${(err.stack || '').replace(/\n/g, '<br/>')}</code><hr/>
 <code>${JSON.stringify(err.data)}</code>
 `));
 
-const port = 3000;
+  app.listen(port, () => {
+    startTimer.check();
+    console.info(`${file} running on port ${port}`);
+  });
 
-app.listen(port, () => startTimer.check() || console.info(`running on port ${port}`));
+  return app;
+}
+
+let port = 3000;
+
+readdir('profiles', (err, profiles) => {
+  const apps = profiles
+          .filter(file => file.match('json'))
+          .map(profile => {
+            launch(profile, port);
+            port += 1;
+          });
+});
