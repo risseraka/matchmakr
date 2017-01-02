@@ -4,6 +4,8 @@ const { readdir, readFileSync: read, writeFileSync: write } = require('fs');
 const qs = require('querystring');
 
 function pluck(obj/*, ...fields*/) {
+  if (!obj) return {};
+
   const fields = Array.prototype.slice.call(arguments, 1);
   return fields.reduce((r, f) => (obj[f] && (r[f] = obj[f]), r), {});
 }
@@ -124,7 +126,7 @@ function percentage(n) {
 function normalizeW(str) {
   return typeof str === 'string' && str
     .normalize('NFD')
-    .replace(/[-.,!\/]/g, '')
+    .replace(/[-.,!\/\]\[\(\)]/g, '')
     .replace(/ +/g, ' ')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
@@ -195,8 +197,12 @@ function compareInts(a, b) {
   return (a || 0) - (b || 0);
 }
 
+function toNumber(value) {
+  return Number.isNaN(+value) ? -1 : +value;
+}
+
 function sortBy(field, reverse) {
-  return arr => arr.sort((a, b) => (a[field] - b[field]) * (reverse ? -1 : 1));
+  return arr => arr.sort((a, b) => (toNumber(a[field]) - toNumber(b[field])) * (reverse ? -1 : 1));
 }
 
 function sortWith(arr, func, reverse) {
@@ -228,12 +234,16 @@ function pushIn(obj, field, values, unique) {
 }
 
 function reduceObject(obj, func, acc) {
+  if (!obj) return acc;
+
   return Object.keys(obj).reduce((r, key, i, keys) => {
     return func(r, obj[key], key, keys);
   }, acc);
 }
 
 function mapObject(obj, func) {
+  if (!obj) return [];
+
   return Object.keys(obj).map(key => func(obj[key], key));
 }
 
@@ -272,8 +282,8 @@ function mapFieldObject(obj, formatItems = e => e) {
 
     return {
       name,
-      items: formatted,
       count: items.length,
+      items: formatted,
     };
   });
 }
@@ -296,8 +306,19 @@ function mapField(profiles, field, formatItems = e => e, formatItem) {
 }
 
 function stringifyToHTML(obj) {
-  if (typeof obj !== 'object') return obj ? obj.toString() : '';
-  return `<ul>${mapObject(obj, (v, k) => `<li>${k}${Array.isArray(v) ? ` (${v.length})`: ''}: ${k === 'href' ? `<a href="${v}">${v}</a>` : stringifyToHTML(v)}</li>`).join('')}</ul>`;
+  if (typeof obj !== 'object') {
+    return obj !== undefined && obj !== null ? obj.toString() : '';
+  }
+
+  const mapped = mapObject(
+    obj,
+    (v, k) => {
+      const length = Array.isArray(v) ? ` (${v.length})`: '';
+      const value = k === 'href' ? `<a href="${v}">${v}</a>` : stringifyToHTML(v);
+      return `<li>${k}${length}: ${value}</li>`;
+    }
+  );
+  return `<ul>${mapped.join('')}</ul>`;
 }
 
 function stringify(obj, exclude = []) {
@@ -328,18 +349,20 @@ function mergeQueries(target, query) {
 }
 
 function parseQuery(q) {
-  return q.trim().split(' ').reduce((r, e) => {
-    e = e.split(':');
+  return flatMap(arrayify(q), e => e.trim().split(' '))
+    .reduce((r, e) => {
+      e = e.split(':');
 
-    const value = (e[1] || e[0]).split(',');
-    const field = !e[1] ? '' : e[0];
+      const value = (e[1] || e[0]).split(',');
+      const field = !e[1] ? '' : e[0];
 
-    pushIn(r, field, value);
-    return r;
-  }, { '': [] });
+      pushIn(r, field, value);
+      return r;
+    }, { '': [] });
 }
 
 const sortByCountDesc = sortBy('count', true);
+const filterByCountPositive = filterBy('count', e => e > 0);
 const filterByCountOne = filterBy('count', e => e > 1);
 
 function filterField(arr, field, value) {
@@ -375,6 +398,7 @@ function formatLine(field) {
 
 const format = {
   profile: p => ({ title: p.name, href: `/profiles/${p.id}` }),
+  name: formatLine('name'),
   'skills.name': formatLine('skills.name'),
   'positions.companyName': formatLine('positions.companyName'),
   'positions.title': formatLine('positions.title'),
@@ -402,14 +426,21 @@ function launch(file, port) {
 
   time.check('mapping');
 
-  function filterProfiles(profiles, field, value) {
+  function filterProfiles(profiles, field, value, greedy = true) {
     const values = arrayify(value).map(normalize);
 
-    return profiles.filter(
-      p => values.filter(
-        v => get(p, field).some(s => normalize(s) === v)
-      ).length === values.length
-    );
+    return profiles.filter(p => {
+      const pValues = get(p, field);
+
+      // match all values
+      if (greedy) {
+        const matches = values.filter(v => pValues.some(s => normalize(s) === v));
+        return matches.length === values.length;
+      }
+
+      // match at least one value
+      return values.some(v => pValues.some(s => normalize(s) === v));
+    });
   }
 
 
@@ -417,6 +448,7 @@ function launch(file, port) {
 
   const maps = {
     profiles: profiles,
+    name: mapField(profiles, 'name', unique),
     'skills.name': mapField(profiles, 'skills.name', unique),
     'positions.companyName': mapField(profiles, 'positions.companyName', unique),
     'positions.title': mapField(profiles, 'positions.title', unique),
@@ -444,7 +476,7 @@ function launch(file, port) {
 
   const indices = {
     profiles: profiles.index,
-    name: index(profiles, 'name'),
+    name: maps.name.index,
     'skills.name': maps['skills.name'].index,
     'positions.companyName': maps['positions.companyName'].index,
     'positions.title': maps['positions.title'].index,
@@ -626,25 +658,23 @@ function launch(file, port) {
 
       query['skills.name'] = skillName;
 
-      results = filterProfiles(results, 'skills.name', skillName);
+      results = filterProfiles(results, 'skills.name', skillName, false);
 
       const skills = skillName.map(normalize);
 
       results.forEach(p => {
         p.matches = {};
 
-        if (!p.matches['skills.name']) {
-          p.matches['skills.name'] = skills.map(v => p.skills.find(s => normalize(s.name) === v));
-        }
+        const matches = skills.map(v => p.skills.find(s => normalize(s.name) === v));
+        const count = matches.filter(e => e).length;
+        p.matches['skills.name'] = {
+          count,
+          score: Math.pow(10, count + 6) + matches.reduce((r, e, i) => r + Math.pow(10, matches.length - i) * (e && e.endorsementCount || 0), 0),
+          matches,
+        };
       });
 
-      results = results.sort((a, b) => {
-        return b.matches['skills.name'].reduce((r, p, i) => {
-          if (r !== null) return r;
-          const diff = (p.endorsementCount || 0) - (a.matches['skills.name'][i].endorsementCount || 0);
-          return diff !== 0 ? diff : null;
-        }, null);
-      });
+      results = results.sort((a, b) => b.matches['skills.name'].score - a.matches['skills.name'].score);
     }
 
     if (query['positions.companyName']) {
@@ -665,8 +695,12 @@ function launch(file, port) {
           href: `/profiles/${id}`,
           title: name,
         }, matches ? {
-          matches: reduceObject(matches, (r, values, key) => {
-            r[key] = values.map(v => pluck(v, 'name', 'endorsementCount'));
+          matches: reduceObject(matches, (r, { matches, count, score }, key) => {
+            r[key] = {
+              count,
+              score,
+              matches: matches.map(v => pluck(v, 'name', 'endorsementCount')),
+            };
             return r;
           }, {}),
         } : {})),
@@ -680,7 +714,7 @@ function launch(file, port) {
           properties: [
             { name: 'table', type: 'hidden', value: 'search' },
             { name: 'key', type: 'text' },
-            { name: 'value', type: 'hidden', value: JSON.stringify(query) },
+            { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
           ],
         },
       },
@@ -689,7 +723,7 @@ function launch(file, port) {
 
   function getProfile({ id }) {
     const profile = indices.profiles[id];
-    if (!profile) return res.status(404).send();
+    if (!profile) return httpError(404, 'no such profile');
 
     const { friends, endorsees, endorsers, network } = networks.index[id];
 
@@ -706,7 +740,6 @@ function launch(file, port) {
           'N/A'
       )
     }, result, {
-      profileUrl,
       skills: skills.map(s => {
         s._links = {
           'skills.name': { href: `/skills.name/${encodeURIComponent(normalize(s.name))}` },
@@ -734,6 +767,13 @@ function launch(file, port) {
       endorsed: formatProfileIds(endorsees),
       endorsers: formatProfileIds(endorsers),
       network: formatProfileIds(network),
+    }, {
+      _links: {
+        linkedin: {
+          href: profileUrl,
+          title: 'LinkedIn profile',
+        },
+      },
     });
 
     return result;
@@ -824,7 +864,7 @@ function launch(file, port) {
 
       const items = {
         'skills.name': collection === 'skills.name' ?
-            getSkillRelatedSkillsMap({ name }) : mapField(profiles, 'skills.name', unique),
+          getSkillRelatedSkillsMap({ name }) : mapField(profiles, 'skills.name', unique),
         'positions.companyName': mapField(profiles, 'positions.companyName', unique),
         'positions.title': mapField(profiles, 'positions.title', unique),
       };
@@ -935,65 +975,106 @@ function launch(file, port) {
     } catch (e) {
       content = {};
     }
-    return mapObject(content, (value, key) => ({
-      key,
-      value: decodeURIComponent(value),
-    }));
+
+    return mapObject(content, (value, key) => {
+      value = JSON.parse(value);
+      value.query = JSON.parse(decodeURIComponent(value.query));
+
+      return {
+        key,
+        value,
+        href: `/savedSearches/${key}`,
+      };
+    });
+  }
+
+  function getSearch({ name }) {
+    const searches = getSearches();
+
+    const object = searches.filter(e => e.key === name)[0];
+    if (!object) return httpError(404, 'no such saved search');
+
+    const profiles = getProfiles(object.value.query);
+
+    return {
+      title: name,
+      query: object.value.query,
+      descrition: object.value.description,
+      count: profiles.count,
+      _embedded: {
+        profiles: profiles._embedded.profile,
+      }
+    };
   }
 
   function getSuggest({ q }) {
     q = normalize(q);
 
+    const fields = [
+      'name',
+      'skills.name',
+      'positions.companyName',
+      'positions.title'
+    ];
+
+    const matches = fields.reduce((r, field) => {
+
+      const exact = indices[field][q] || [];
+      r.exact.push(Object.assign({
+        field,
+        count: exact.length,
+      }, field !== 'name' ? {
+        href: `/${field}/${encodeURIComponent(q)}`,
+      } : {
+        href: `/profiles?name=${encodeURIComponent(q)}`,
+        profiles: exact.map(({ name: title, id }) => ({
+          title,
+          href: `/profiles/${id}`,
+        })),
+      }));
+
+      const partial = maps[field].filter(e => e.name !== q && e.name.includes(q));
+      r.partial.push(Object.assign({
+        field,
+        count: partial.length,
+      }, {
+        href: field !== 'name' ?
+          `/${field}?q=${encodeURIComponent(q)}` :
+          `/profiles?name=${encodeURIComponent(q)}`,
+      }, {
+        items: sortByCountDesc(partial.map(({ name, count }) => ({
+          title: name,
+          href: field !== 'name' ?
+            `/${field}/${encodeURIComponent(name)}` :
+            `/profiles?name=${encodeURIComponent(name)}`,
+          count,
+        }))).slice(0, 3),
+      }));
+      return r;
+    }, { exact: [], partial: [] });
+
+    matches.exact = filterByCountPositive(sortByCountDesc(matches.exact));
+
+    matches.partial = filterByCountPositive(matches.partial.sort((a, b) => {
+      return b.items.reduce((r, e) => Math.max(r, e.count), 0) -
+        a.items.reduce((r, e) => Math.max(r, e.count), 0);
+    }));
+
     const searches = getSearches();
 
-    const counts = profiles.reduce(
-      (r, p) => {
-        r.name += normalize(p.name).includes(q);
-        r['skills.name'] += p.skills.some(e => normalize(e.name).includes(q));
-        r['positions.title'] += p.positions.some(e => normalize(e.title).includes(q));
-        r['positions.companyName'] += p.positions.some(e => normalize(e.companyName).includes(q));
-        return r;
-      },
-      {
-        q: 0,
-        name: 0,
-        'skills.name': 0,
-        'positions.title': 0,
-        'positions.companyName': 0,
-      }
-    );
-
-    const getFieldCount = f => counts[f];
-
-    const fields = sortWith(Object.keys(counts).filter(getFieldCount), getFieldCount, true);
-
-    const result = fields.reduce(
-      (r, field) => {
-        r.results[field] = { href: `/profiles?${field}=${q}`, count: counts[field] };
-
-        const p = indices[field][q];
-        if (p) {
-          r.matches[field] = field === 'name' ?
-            p.map(p => ({ href: `/profiles/${p.id}`, count: p.name })) :
-          { href: `/${field}/${q}` };
-        }
-        return r;
-      },
-      { results: {}, matches: {} }
-    );
-
-    const sresults = searches.reduce((r, { value, key }) => {
-      if (value.includes(q) || normalize(key).includes(q)) {
-        value = JSON.parse(value);
-        r.push({ title: key, href: `/profiles?${qs.stringify(value)}` });
+    const sresults = sortByCountDesc(searches.reduce((r, { value: { query }, key }) => {
+      if (normalize(JSON.stringify(query)).includes(q) || normalize(key).includes(q)) {
+        const count = getProfiles(query).count;
+        r.push({ title: key, count, href: `/savedSearches/${key}` });
       }
       return r;
-    }, []);
+    }, []));
 
     return {
-      'saved searches': sresults,
-      'exact matches': result.matches,
-      'profiles matches': result.results,
+      _links: Object.assign(
+        { search: sresults },
+        matches
+      ),
     };
   }
 
@@ -1054,7 +1135,7 @@ routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>
       get('/livereload', () => {});
       get('/profiles', callWithReqQuery(getProfiles));
       get('/profiles/:id', callWithReqParams(getProfile));
-      get('/profiles/:id/map', callWithReqQuery(getProfileMap));
+      get('/profiles/:id/map', callWithReqParams(getProfileMap));
       get('/profilesMap', callWithReqQuery(getProfilesMap));
 
       get('/skills.name', callWithReqQuery(getMapCollection('skills.name')));
@@ -1073,6 +1154,7 @@ routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>
 
       get('/suggest/:q', callWithReqParams(getSuggest));
       get('/savedSearches', callWithReqQuery(getSearches));
+      get('/savedSearches/:name', callWithReqParams(getSearch));
       app.post('/save', callWithReqBody(saveSomething));
 
       app.get('/inspect/:variable/:field', callWithReqParams(inspect));
@@ -1099,6 +1181,9 @@ let port = 3000;
 readdir('profiles', (err, profiles) => {
   const apps = profiles
           .filter(file => file.match('json'))
+//          .slice(0, 1)
+//          .slice(1, 2)
+          .slice(-1)
           .map(profile => {
             launch(profile, port);
             port += 1;
