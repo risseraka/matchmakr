@@ -42,7 +42,7 @@ function testProfiles(done) {
   get(profilesUrl, function (err, ids) {
     if (err) { return done(err); }
 
-    // console.log(ids);
+    // Console.log(ids);
 
     var profilesUrls = ids.map(function (id) {
       return profilesUrl + id;
@@ -62,7 +62,7 @@ var skillsUrl = baseUrl + '/skills/';
 
 function testSkills(done) {
   get(skillsUrl, function (err, skills) {
-    // console.log(skills);
+    // Console.log(skills);
 
     async.mapLimit(skills, 10, function (skill, callback) {
       var url = profilesUrl + '?skill=' + encodeURIComponent(skill);
@@ -96,7 +96,7 @@ function testNeeds(needType, done) {
   get(needTypeUrl, function (err, needTypes) {
     if (err) { return done(needTypes + err); }
 
-    // console.log(needTypes);
+    // Console.log(needTypes);
 
     var needTypeUrls = Object.keys(needTypes).map(function (skill) {
       return needTypeUrl + '?skill=' + encodeURIComponent(skill);
@@ -128,10 +128,10 @@ async.parallel({
   requests: testNeeds.bind(global, 'requests'),
   proposals: testNeeds.bind(global, 'proposals')
 }, function (err, results) {
-  if (err) return console.trace(err);
+  if (err) { return console.trace(err); }
 
   var profile = results.profiles[0];
 
   if (false)
-    testProfileNeeds(profile);
+    { testProfileNeeds(profile); }
 });

@@ -53,7 +53,7 @@ function indexing(items, path) {
     }
 
     if (keys.length === 1 && keys[0] === '') {
-      // something is wrong
+      // Something is wrong
       throw 'oops?';
       break;
     }

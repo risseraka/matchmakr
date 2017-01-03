@@ -1,0 +1,26 @@
+{
+  "name": "matchmakr-app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "start": "supervisor index",
+    "test": "node tests"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "async": "1.5.2",
+    "body-parser": "1.15.0",
+    "compression": "1.6.1",
+    "cors": "2.7.1",
+    "elasticsearch": "10.1.3",
+    "eslint": "^3.12.0",
+    "express": "4.13.4",
+    "hal-url-absolutizer": "0.0.5",
+    "morgan": "1.6.1",
+    "request": "2.69.0",
+    "supervisor": "0.9.1"
+  }
+}

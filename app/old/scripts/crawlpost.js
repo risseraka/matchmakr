@@ -19,7 +19,7 @@ function get(uri, callback) {
 var index = {};
 
 function addLink(links, link) {
-  if (link.rel === 'nofollow') return;
+  if (link.rel === 'nofollow') { return; }
 
   var href = link.href;
 

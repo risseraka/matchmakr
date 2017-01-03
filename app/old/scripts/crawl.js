@@ -17,7 +17,7 @@ function createList(arr, callback) {
 
   list.start();
 
-  list.on('keypress', function(key, item){
+  list.on('keypress', function(key, item) {
     switch (key.name) {
     case 'return':
       list.stop();
@@ -46,7 +46,7 @@ function get(uri, callback) {
 var index = {};
 
 function addLink(links, link) {
-  if (link.rel === 'nofollow') return;
+  if (link.rel === 'nofollow') { return; }
 
   var href = link.href;
 

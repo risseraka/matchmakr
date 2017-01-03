@@ -1,1079 +1,1214 @@
 'use strict';
 
-var std = [
-  'http', 'https', 'fs', 'path', 'url', 'querystring'
-].reduce(function (std, name) {
-  std[name] = require(name);
+const { readdir, readFileSync: read, writeFileSync: write } = require('fs');
+const qs = require('querystring');
 
-  return std;
-}, {});
+function pluck(obj/*, ...fields*/) {
+  if (!obj) return {};
 
-var async = require('async');
+  const fields = Array.prototype.slice.call(arguments, 1);
+  return fields.reduce((r, f) => (obj[f] && (r[f] = obj[f]), r), {});
+}
 
-var elasticsearch = require('elasticsearch');
+function timer(inLabel) {
+  inLabel = `${inLabel || 'time'}`;
 
-var client = new elasticsearch.Client({
-  host: 'localhost:9200'
-});
+  let label;
 
-var express = require('express');
-var bodyParser = require('body-parser');
-var morgan = require('morgan');
-var cors = require('cors');
-var compression = require('compression')
-var linksAbsolutizer = require('hal-url-absolutizer');
+  const timer = {
+    buildLabel(newLabel) {
+      return label = newLabel && `${inLabel}:${newLabel}` || inLabel;
+    },
+    start(newLabel) {
+      label = timer.buildLabel(newLabel);
 
-var jsonformatter = require('./lib/jsonformatter');
+      console.time(label);
 
-var formatter = new jsonformatter.JSONFormatter();
+      return timer;
+    },
+    check(newLabel) {
+      console.timeEnd(label);
 
-var indexing = require('./lib/indexing');
+      label = timer.buildLabel(newLabel);
 
-var app = express();
+      console.time(label);
 
-var mappings = std.fs.readdirSync('mappings').reduce(function (mappings, fileName) {
-  mappings[std.path.basename(fileName, '.json')] = require('./mappings/' + fileName);
+      return timer;
+    },
+  };
+  return timer;
+}
 
-  return mappings;
-}, {});
+function liveReload() {
+  const scriptTag = `<script type="text/javascript">
+function checkReload(etag) {
+  fetch(new Request('/livereload')).catch(() => window.location.reload());
+}
+checkReload();
+</script>`;
 
-function inValues(values) {
-  return function (val) {
-    return values.indexOf(val) !== -1;
+  return (req, res, next) => {
+    const send = res.send.bind(res);
+    //  res.send = str => send(liveReload + (str || ''));
+    next();
   };
 }
 
-function notEq(comp) {
-  return function (val) {
-    return val !== comp;
+function cache() {
+  const memo = {};
+  return (req, res, next) => {
+    if (req.method !== 'GET') return next();
+
+    const send = res.send.bind(res);
+
+    if (!('nocache' in req.query) && memo[req.url]) {
+      return send(memo[req.url]);
+    }
+
+    res.send = result => {
+      if (!memo[req.url]) memo[req.url] = result;
+
+      send(result);
+    };
+
+    next();
   };
 }
 
-function capitalize(str) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
+function httpError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  throw e;
 }
 
-function escapeRegExp(str) {
-  return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
-}
+function callWithReq(field, func) {
+  return (req, res) => {
+    const result = func(req[field]);
 
-function stringSortByField(field) {
-  return function (a, b) {
-    if (b[field] > a[field]) { return -1; }
-    if (b[field] < a[field]) { return 1; }
-    return 0;
+    res.format({
+      html: () => res.send(stringifyToHTML(result)),
+      default: () => res.send(result),
+    });
   };
 }
 
-function asArray(obj) {
-  if (!Array.isArray(obj)) {
-    obj = [ obj ];
+function callWithReqParams(func) {
+  return callWithReq('params', func);
+}
+
+function callWithReqQuery(func) {
+  return callWithReq('query', func);
+}
+
+function callWithReqBody(func) {
+  return callWithReq('body', func);
+}
+
+function memoize(func) {
+  return func;
+  const memo = {};
+  return (...args) => {
+    if (memo[args]) return memo[args];
+    return memo[args] = func.apply(this, args);
+  };
+}
+
+function decimal(n, digit) {
+  const pow = Math.pow(10, digit);
+  return Math.floor(n * pow) / pow;
+}
+
+function percentage(n) {
+  return decimal(n * 100, 2);
+}
+
+// http://stackoverflow.com/questions/990904/remove-accents-diacritics-in-a-string-in-javascript
+function normalizeW(str) {
+  return typeof str === 'string' && str
+    .normalize('NFD')
+    .replace(/[-.,!\/\]\[\(\)]/g, '')
+    .replace(/ +/g, ' ')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+const normalize = memoize(normalizeW);
+
+function get(obj, fields, flat) {
+  if (!obj || !fields) return obj;
+
+  if (typeof fields === 'string') fields = fields.split('.');
+
+  for (let i = 0, j = fields.length; i < j; i += 1) {
+    if (!obj) return null;
+    if (Array.isArray(obj) && !(fields[i] in obj)) {
+      return flat ?
+        flatMap(obj, (o => get(o, fields.slice(i)))) :
+        obj.map(o => get(o, fields.slice(i)));
+    }
+    try {
+      obj = obj[fields[i]];
+    } catch(e) {
+      console.log(obj, fields);
+      throw e;
+    }
   }
 
   return obj;
 }
 
-function getProfileUrl(id) {
-  return '/profiles/' + id;
+function uniqueW(arr) {
+  if (!arr || !arr.length) return [];
+  return [...new Set(arr)];
 }
 
-app.use(cors({
-  credentials: true,
-  origin: function (origin, callback) {
-    callback(null, true);
-  }
-}));
+const unique = memoize(uniqueW);
 
-app.use(morgan('common'));
-app.use(compression());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
-
-app.use(function (req, res, next) {
-  req.baseUri = req.protocol + '://' + req.get('host');
-  req.uri = req.baseUri + req.originalUrl;
-
-  next();
-});
-
-function passResult(middleware) {
-  return function (req, res, next) {
-    middleware(req, res, function (err, result) {
-      if (err) { return next(err); }
-
-      req.result = result;
-
-      next();
-    });
-  };
+function closure(...args) {
+  const func = args.pop();
+  return func(...args);
 }
 
-function addProfileLinks(profile) {
-  var links = buildProfileLinks(profile);
-
-  profile._links = links;
-
-  return profile;
+function intersection(arr1, arr2) {
+  if (!arr1.length || !arr2.length) return [];
+  return arr1.filter(e => arr2.includes(e));
 }
 
-function buildProfileResource(profile) {
-  profile = profile._source;
-
-  return addProfileLinks(profile);
+function intersects(arr1, arr2) {
+  if (!arr1.length || !arr2.length) return false;
+  return arr1.some(e => arr2.includes(e));
 }
 
-function sendProfile(req, res, next) {
-  var profile = buildProfileResource(req.profile);
-
-  res.result = profile;
-
-  next();
+function union(...args) {
+  if (!args.length) return [];
+  return [].concat(...args);
 }
 
-function sendProfilesResults(req, res, next) {
-  var profiles = req.result;
+function arrayify(obj) {
+  if (Array.isArray(obj)) return obj;
 
-  var profilesLinks = {};
+  return [obj];
+}
 
-  if (profiles.length > 0) {
-    var links = profiles.map(function (profile) {
-      return {
-        title: profile.name,
-        href: getProfileUrl(profile.id)
-      };
-    }).sort(stringSortByField('href'));
+function compareStrings(a, b) {
+  return a === b ? 0 : (a < b ? 1 : -1);
+}
 
-    profilesLinks.profiles = links;
+function compareInts(a, b) {
+  return (a || 0) - (b || 0);
+}
+
+function toNumber(value) {
+  return Number.isNaN(+value) ? -1 : +value;
+}
+
+function sortBy(field, reverse) {
+  return arr => arr.sort((a, b) => (toNumber(a[field]) - toNumber(b[field])) * (reverse ? -1 : 1));
+}
+
+function sortWith(arr, func, reverse) {
+  return arr.sort((a, b) => (func(a) - func(b)) * (reverse ? -1 : 1));
+}
+
+function filterBy(field, func) {
+  return arr => arr.filter(e => func(e[field]));
+}
+
+function flatMap(arr, func) {
+  return [].concat(...arr.map(func));
+}
+
+function pushIn(obj, field, values, unique) {
+  if (unique) {
+    obj[field] = values;
+    return;
   }
 
-  Object.keys(mappings.profile.properties).reduce(function (needsLinks, field) {
-    if (field === 'id') { return needsLinks; }
+  if (!obj[field]) {
+    obj[field] = [];
+  }
+  if (Array.isArray(values)) {
+    Array.prototype.push.apply(obj[field], arrayify(values));
+  } else {
+    obj[field].push(values);
+  }
+}
 
-    var label = field === 'name' ? 'profiles' : field;
+function reduceObject(obj, func, acc) {
+  if (!obj) return acc;
 
-    needsLinks['searchBy' + capitalize(field)] = {
-      href: '/index/' + label + '?next=' + encodeURIComponent(req.uri)
+  return Object.keys(obj).reduce((r, key, i, keys) => {
+    return func(r, obj[key], key, keys);
+  }, acc);
+}
+
+function mapObject(obj, func) {
+  if (!obj) return [];
+
+  return Object.keys(obj).map(key => func(obj[key], key));
+}
+
+function indexObject(obj, format = (k, v) => k) {
+  return reduceObject(obj, (r, value, key) => arrayify(value).reduce((r, value) => {
+    pushIn(r, value, format(key, value));
+    return r;
+  }, r), {});
+}
+
+function index(arr, field, unique, format = e => e) {
+  if (!arr || !arr.length) return {};
+
+  const formatItem = typeof format === 'function' ? format : e => get(e, format);
+
+  return arr.reduce((r, e) => {
+    const key = !field ?
+            e :
+            (typeof field === 'function' ? field(e) : get(e, field));
+
+    return [...[].concat(key)].reduce((r, key) => {
+      if (typeof key === 'string') key = normalize(key);
+      pushIn(r, key, formatItem(e), unique);
+      return r;
+    }, r);
+  }, {});
+}
+
+function mapFieldObject(obj, formatItems = e => e) {
+  const itemsFormatter = typeof formatItems === 'function' ?
+          formatItems :
+          (!formatItems ? e => e : items => get(items, formatItems));
+
+  return mapObject(obj, (items, name) => {
+    const formatted = itemsFormatter(items, name);
+
+    return {
+      name,
+      count: items.length,
+      items: formatted,
     };
+  });
+}
 
-    return needsLinks;
-  }, profilesLinks);
+function mapField(profiles, field, formatItems = e => e, formatItem) {
+  if (!profiles || !profiles.length) return [];
 
-  res.result = {
-    total: profiles.total,
-    _links: profilesLinks,
-    _embedded: {
-      profiles: profiles.map(addProfileLinks)
+  const fieldIndex = index(profiles, field, false, formatItem);
+
+  const map = mapFieldObject(fieldIndex, (items, name) => {
+    const formatted = formatItems(items, name);
+
+    // Overwrite index items by formatted ones
+    fieldIndex[name] = formatted;
+
+    return formatted;
+  });
+  map.index = fieldIndex;
+  return map;
+}
+
+function stringifyToHTML(obj) {
+  if (typeof obj !== 'object') {
+    return obj !== undefined && obj !== null ? obj.toString() : '';
+  }
+
+  const mapped = mapObject(
+    obj,
+    (v, k) => {
+      const length = Array.isArray(v) ? ` (${v.length})`: '';
+      const value = k === 'href' ? `<a href="${v}">${v}</a>` : stringifyToHTML(v);
+      return `<li>${k}${length}: ${value}</li>`;
     }
-  };
-
-  next();
+  );
+  return `<ul>${mapped.join('')}</ul>`;
 }
 
-function handleProfilesResults(next) {
-  return function (err, result) {
-    if (err) { return next(err); }
+function stringify(obj, exclude = []) {
+  if (typeof obj !== 'object') return obj ? obj.toString() : '';
+  return mapObject(obj, (v, k) => !exclude.includes(k) ? stringify(v): '');
+}
 
-    var profiles = result.hits.hits.map(function (profile) {
-      return profile._source;
-    }).sort(stringSortByField('name'));
+function Search(haystack, exclude = []) {
+  const stringed = haystack.map(p => normalize(stringify(p, exclude).join(' ')));
 
-    profiles.total = result.hits.total;
+  const search = needle => {
+    needle = arrayify(needle).map(normalize);
+    return stringed.filter(e => needle.every(n => e.includes(n))).map(e => e.split(' ')[0]);
+  };
+  search.stringed = stringed;
+  return search;
+}
 
-    next(null, profiles);
+function mergeQueries(target, query) {
+  return reduceObject(query, (r, value, field) => {
+    if (field == '') {
+      r.q = value;
+    } else {
+      r[field] = (value || []).concat(r[field] || []);
+    }
+    return r;
+  }, target);
+}
+
+function parseQuery(q) {
+  return flatMap(arrayify(q), e => e.trim().split(' '))
+    .reduce((r, e) => {
+      e = e.split(':');
+
+      const value = (e[1] || e[0]).split(',');
+      const field = !e[1] ? '' : e[0];
+
+      pushIn(r, field, value);
+      return r;
+    }, { '': [] });
+}
+
+const sortByCountDesc = sortBy('count', true);
+const sortByEndorsementCountDesc = sortBy('endorsementCount', true);
+const filterByCountPositive = filterBy('count', e => e > 0);
+const filterByCountOne = filterBy('count', e => e > 1);
+
+function filterField(arr, field, value) {
+  const values = arrayify(value);
+
+  return values.reduce((r, value) => {
+    const item = arr.skills.find(i => normalize(i.name) === value);
+    if (item) r.push(item);
+    return r;
+  }, []);
+}
+
+const filterAndSortByCountOne = arr => filterByCountOne(sortByCountDesc(arr));
+
+// Init data
+
+function formatLine(field) {
+  return (c, current = '') => s => {
+    const name = encodeURIComponent(s.name);
+    return {
+      href: `/${field}/${name}`,
+      title: s.name,
+      _links: {
+        profile: {
+          href: `/profiles?${current}${field}=${name}`,
+          count: s.count,
+          percentage: c ? percentage(s.count / c) : 'N/A',
+        },
+      },
+    };
   };
 }
 
-app.get('/', function (req, res, next) {
-  res.result = {
-    _links: {
-      profiles: {
-        href: './profiles'
-      },
-      skills: {
-        href: './skills'
-      },
-      companies: {
-        href: './companies'
-      },
-      needs: {
-        href: './needs'
-      },
-      indices: {
-        href: './index'
-      },
-      forms: {
-        href: './forms',
-        rel: 'nofollow'
+const format = {
+  profile: p => ({ title: p.name, href: `/profiles/${p.id}` }),
+  name: formatLine('name'),
+  'skills.name': formatLine('skills.name'),
+  'positions.companyName': formatLine('positions.companyName'),
+  'positions.title': formatLine('positions.title'),
+};
+
+function launch(file, port) {
+  console.log(`launching '${file}' on port ${port}`);
+
+  const startTimer = timer(`${file} started in`).start();
+  const time = timer().start('profiles');
+
+  const profiles = require(`./profiles/${file}`).sort((a, b) => {
+    a = normalize(a.name);
+    b = normalize(b.name);
+    return a > b ? 1 : (a < b ? -1 : 0);
+  });
+  profiles.forEach(p => {
+    sortByEndorsementCountDesc(p.skills);
+    p.positions.sort((a, b) => {
+      return b.startDate !== a.startDate ? b.startDate - a.startDate : (a.endDate || b.endDate);
+    });
+  });
+
+  profiles.index = index(profiles, 'id', true);
+
+  time.check('mapping');
+
+  function filterProfiles(profiles, field, value, greedy = true) {
+    const values = arrayify(value).map(normalize);
+
+    return profiles.filter(p => {
+      const pValues = get(p, field);
+
+      // match all values
+      if (greedy) {
+        const matches = values.filter(v => pValues.some(s => normalize(s) === v));
+        return matches.length === values.length;
       }
-    }
+
+      // match at least one value
+      return values.some(v => pValues.some(s => normalize(s) === v));
+    });
+  }
+
+
+  const search = Search(profiles, ['profileUrl']);
+
+  const maps = {
+    profiles: profiles,
+    name: mapField(profiles, 'name', unique),
+    'skills.name': mapField(profiles, 'skills.name', unique),
+    'positions.companyName': mapField(profiles, 'positions.companyName', unique),
+    'positions.title': mapField(profiles, 'positions.title', unique),
   };
 
-  next();
-});
+  time.check('endorsers');
 
-function fetchAllProfileFields(field) {
-  return function (next) {
-    client.search({
-      index: 'matchmakr',
-      type: 'profile',
-      body: {
-        aggs: {
-          items: {
-            terms: {
-              size: 0,
-              field: field,
-              order : { _term : 'asc' }
+  function buildEndorsements() {
+    const endorsements = profiles.reduce(
+      (r, p) => p.skills.reduce(
+        (r, s) => s.endorsers.reduce(
+          (r, endorser) => {
+            pushIn(r.endorsers, endorser, p.id);
+
+            pushIn(r.endorsees, p.id, endorser);
+            return r;
+          }, r), r
+      ), { endorsers: {}, endorsees: {} }
+    );
+
+    return endorsements;
+  }
+
+  const { endorsers, endorsees } = buildEndorsements();
+
+  const indices = {
+    profiles: profiles.index,
+    name: maps.name.index,
+    'skills.name': maps['skills.name'].index,
+    'positions.companyName': maps['positions.companyName'].index,
+    'positions.title': maps['positions.title'].index,
+    endorsers,
+    endorsees,
+  };
+
+  time.check('network');
+
+  function buildNetwork() {
+    const time = timer('network').start('all');
+
+    const allEndorsees = Object.keys(endorsees);
+    const allEndorsers = Object.keys(endorsers);
+    const all = unique(union(allEndorsees, allEndorsers, get(profiles, 'id')).map(id => +id));
+
+    time.check('map');
+
+    const networks = all.map(a => {
+      const profile = indices.profiles[a] || { id: +a };
+
+      const { id, name = '' } = profile;
+
+      const pendorsers = unique(indices.endorsees[id]);
+      const pendorsees = unique(indices.endorsers[id]);
+      const connecteds = unique(union(pendorsers, pendorsees));
+      const friends = intersection(pendorsers, pendorsees);
+
+      return { id, name, friends, endorsers: pendorsers, endorsees: pendorsees, connecteds };
+    });
+
+    time.check('index');
+
+    networks.index = index(networks, 'id', true);
+
+    time.check('intersection');
+
+    networks.forEach(f => {
+      const { id, friends, connecteds } = f;
+
+      const network = connecteds.filter(
+        p => intersection(networks.index[p].connecteds, connecteds).length
+      );
+
+      f.network = network;
+    });
+
+    time.check('sort');
+
+    networks.sort((a, b) => compareInts(b.network.length, a.network.length));
+
+    time.check();
+
+    return networks;
+  }
+
+  const networks = buildNetwork();
+
+  indices.networks = networks.index;
+
+  time.check('skillsMatrice');
+
+  function buildSkillsMatrice() {
+    const time = timer('skillsMatrice').start('map');
+
+    const keys = get(filterAndSortByCountOne(maps['skills.name']), 'name');
+
+    const skillsMap = keys.map(name => ({
+      name,
+      items: flatMap(get(indices['skills.name'][name], 'skills.name'), e => e.map(normalize)),
+    }));
+
+    time.check('add reduce');
+
+    const skillsMatrice = skillsMap.reduce(
+      (r, { name: s1, items }) => {
+        const skills = {};
+        const top = { name: '', count: 0 };
+        const rs1 = r[s1] = { skills, top };
+
+        return items.reduce((r, s2) => {
+          if (s1 === s2) return r;
+          const rs2 = (skills[s2] || 0) + 1;
+
+          skills[s2] = rs2;
+
+          if (rs2 > top.count) {
+            top.count = rs2;
+            if (s2 !== top.name) {
+              top.name = s2;
             }
           }
-        }
-      }
-    }, function (err, result) {
-      if (err) { return next(err); }
+          return r;
+        }, r);
+      },
+      {}
+    );
 
-      var items = result.aggregations.items.buckets.map(function (item) {
-        return {
-          total: item.doc_count,
-          title: item.key,
-          href: '/profiles/?' + field + '=' + encodeURIComponent(item.key)
+    time.check('top map');
+
+    const tops = keys.map(name => ({
+      name,
+      top: skillsMatrice[name].top.name,
+    }));
+
+    time.check('invert');
+
+    const topSkillsIndex = indexObject(
+      index(tops, 'name', true, 'top')
+    );
+
+    time.check('keys');
+
+    keys.forEach(name => {
+      const matrice = skillsMatrice[name];
+      matrice.keys = Object.keys(matrice.skills);
+    });
+
+    time.check();
+
+    return { skillsMatrice, topSkillsIndex };
+  }
+
+  const { skillsMatrice, topSkillsIndex } = buildSkillsMatrice();
+
+  indices.skillsMatrice = skillsMatrice;
+  indices.topSkills = topSkillsIndex;
+
+  time.check('skillsMap');
+
+  // App setup
+
+  const express = require('express');
+  const bodyParser = require('body-parser');
+  const morgan = require('morgan');
+
+  const app = express();
+
+  function formatProfileIds(ids, func) {
+    if (!ids) return [];
+
+    return [
+      ...ids
+        .filter(e => indices.profiles[e])
+        .map(e => indices.profiles[e])
+        .sort((a, b) => compareStrings(b.name, a.name))
+        .map(func || format.profile),
+      ...ids.filter(e => !indices.profiles[e]).sort(compareInts)
+    ];
+  }
+
+  function formatProfile(profile) {
+    const { id, name } = profile;
+    return name ? `${id}: ${name}` : id;
+  }
+
+  function getProfiles(query) {
+    let results = JSON.parse(JSON.stringify(profiles));
+
+    if (query.q) {
+      query = mergeQueries(query, parseQuery(query.q));
+
+      query.q = query.q.map(normalize);
+
+      results = search(query.q).map(i => indices.profiles[i]);
+    }
+
+    if (query.name) {
+      query.name = normalize(query.name);
+      results = results.filter(p => normalize(p.name).includes(query.name));
+    }
+
+    if (query['skills.name']) {
+      const skillName = unique(flatMap(
+        arrayify(query['skills.name']),
+        e => e.split(',')
+      ));
+
+      query['skills.name'] = skillName;
+
+      results = filterProfiles(results, 'skills.name', skillName, false);
+
+      const skills = skillName.map(normalize);
+
+      results.forEach(p => {
+        p.matches = {};
+
+        const matches = skills.map(v => p.skills.find(s => normalize(s.name) === v));
+        const count = matches.filter(e => e).length;
+        p.matches['skills.name'] = {
+          count,
+          score: Math.pow(10, count + 6) + matches.reduce((r, e, i) => r + Math.pow(10, matches.length - i) * (e && e.endorsementCount || 0), 0),
+          matches,
         };
       });
 
-      next(null, items);
-    });
-  };
-}
-
-function fetchOneProfile(id, next) {
-  client.search({
-    index: 'matchmakr',
-    type: 'profile',
-    size: 1,
-    body: {
-      query: {
-        term: {
-          id: id
-        }
-      }
+      results = results.sort((a, b) => b.matches['skills.name'].score - a.matches['skills.name'].score);
     }
-  }, next);
-}
 
-function countAllProfiles(next) {
-  client.count({
-    index: 'matchmakr',
-    type: 'profile'
-  }, function (err, result) {
-    if (err) { return next(err); }
-
-    var profiles = [];
-    profiles.total = result.count;
-
-    next(null, profiles);
-  });
-}
-
-function fetchAllProfiles(match, next) {
-  if (! next) {
-    next = match;
-    match = '';
-  }
-
-  var query = match ? {
-    match: {
-      _all: match
+    if (query['positions.companyName']) {
+      const companyName = query['positions.companyName'];
+      results = filterProfiles(results, 'positions.companyName', companyName);
     }
-  } : {
-    match_all: {
+
+    if (query['positions.title']) {
+      const title = query['positions.title'];
+      results = filterProfiles(results, 'positions.title', title);
     }
-  };
 
-  client.search({
-    index: 'matchmakr',
-    type: 'profile',
-    size: 1000,
-    body: {
-      query: query
-    }
-  }, handleProfilesResults(next));
-}
-
-function fetchAllNeedFields(field) {
-  return function (next) {
-    next(null, [ 'requests', 'proposals' ]);
-  };
-}
-
-var fetchAll = {
-  profiles: fetchAllProfiles,
-  skills: fetchAllProfileFields('skills'),
-  companies: fetchAllProfileFields('companies'),
-  type: fetchAllNeedFields('type')
-};
-
-var countAll = {
-  profiles: countAllProfiles
-};
-
-var types = [ 'profiles', 'skills', 'companies' ];
-
-var indexRouter = express.Router();
-
-indexRouter.get('/', function (req, res, next) {
-  res.result = {
-    _links: types.reduce(function (links, type) {
-      links[type] = {
-        href: './' + type
-      };
-
-      return links;
-    }, {})
-  };
-
-  next();
-});
-
-indexRouter.get('/:type/:path?', passResult(function (req, res, next) {
-  var type = req.params.type;
-
-  if (! fetchAll[type]) { return next(); }
-
-  return fetchAll[type](next);
-}), function (req, res, next) {
-  var type = req.params.type;
-
-  if (!req.query[type]) {
-    return next();
-  }
-
-  if (req.query.next) {
-    var nextUri = req.query.next +
-        (req.query.next.match('\\?') ? '&' : '?') +
-        type + '=' + req.query[type];
-
-    return res.redirect(nextUri);
-  }
-
-  return res.redirect('/' + type + '/' + encodeURIComponent(req.query[type]));
-}, function (req, res, next) {
-  var result = req.result;
-
-  if (! result || result.length < 1) {
-    return next();
-  }
-
-  var path = req.params.path || '';
-
-  var index = indexing(result, path);
-
-  var keys = Object.keys(index);
-
-  if (keys.length < 1) {
-    return next();
-  }
-
-  var links = {};
-
-  var fullPath = path + keys[0].substr(0, keys[0].length - 1);
-
-  if (path) {
-    links.back = {
-      href: path.length === 1 ? '..' : path.substr(0, path.length - 1)
-    };
-  }
-
-  var type = req.params.type;
-
-  links.keys = keys.map(function (key) {
-    var items = index[key];
-    var item = items[0];
-    var title = item.title || item.name || item;
-
-    var link = items.length === 1 ? {
-      title: title,
-      rel: type,
-      href: '&' + type + '=' + title,
-      key: key.substr(-1)
-    } : {
-      rel: 'index',
-      href: {
-        path: encodeURIComponent(key),
-        mergePath: path ? true : false,
-        joinPath: path ? false : true
+    return Object.assign({
+      count: results.length,
+    }, {
+      _embedded: {
+        profile: results.map(({ id, name, matches }) => Object.assign({
+          href: `/profiles/${id}`,
+          title: name,
+        }, matches ? {
+          matches: reduceObject(matches, (r, { matches, count, score }, key) => {
+            r[key] = {
+              count,
+              score,
+              matches: matches.map(v => pluck(v, 'name', 'endorsementCount')),
+            };
+            return r;
+          }, {}),
+        } : {})),
       },
-      key: key.substr(-1)
-    };
-
-    return link;
-  }, {});
-
-  res.result = {
-    path: fullPath,
-    _links: links
-  };
-
-  next();
-});
-
-app.use('/index', indexRouter);
-
-var skillRouter = express.Router();
-
-skillRouter.get('/', passResult(function (req, res, next) {
-  fetchAll.skills(next);
-}), function (req, res, next) {
-  var skills = req.result;
-
-  if (req.query.q) {
-    var q = escapeRegExp(req.query.q);
-
-    skills = skills.filter(function (skill) {
-      return skill.name.match(q);
-    });
+    }, query.q ? {
+      _templates: {
+        default: {
+          title: 'Save search as',
+          method: 'post',
+          action: '/save',
+          properties: [
+            { name: 'table', type: 'hidden', value: 'search' },
+            { name: 'key', type: 'text' },
+            { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
+          ],
+        },
+      },
+    } : {});
   }
 
-  res.result = {
-    _links: {
-      skills: skills
-    }
-  };
+  function getProfile({ id }) {
+    const profile = indices.profiles[id];
+    if (!profile) return httpError(404, 'no such profile');
 
-  next();
-});
+    const { friends, endorsees, endorsers, network } = networks.index[id];
 
-skillRouter.get('/:skill', function (req, res, next) {
-  return res.redirect('/profiles?' + 'skills' + '=' + req.params.skill);
-});
+    let result = JSON.parse(JSON.stringify(profile));
 
-app.use('/skills', skillRouter);
+    const { positions, skills, profileUrl } = result;
 
-var formsRouter = express.Router();
+    return Object.assign({
+      id,
+      seniority: closure(
+        positions.reduce((r, p) => (p.startDate || 0) < (r.startDate || 0) ? p : r),
+        xp1 => xp1 && xp1.startDate ?
+          new Date().getFullYear() - new Date(xp1.startDate).getFullYear() :
+          'N/A'
+      )
+    }, result, {
+      skills: skills.map(s => {
+        const name = normalize(s.name);
 
-formsRouter.get('/', function (req, res, next) {
-  res.result = {
-    _links: {
-      needs: {
-        href: './needs'
-      }
-    }
-  };
+        const items = indices['skills.name'][name];
 
-  next();
-});
+        if (s.endorsementCount && items.length > 1) {
+          const endorsements = items
+                  .map(p => toNumber(p.skills.find(s => normalize(s.name) === name).endorsementCount))
+                  .sort((a, b) => compareInts(b, a));
+          const index = endorsements.indexOf(s.endorsementCount);
+          const p = index / endorsements.length;
+          s.percentile = Math.ceil(p * (p < 0.05 ? 20 : 10)) * (p < 0.05 ? 5 : 10) || 1;
+        } else {
+          s.percentile = 'N/A';
+        }
 
-formsRouter.get('/needs', function (req, res, next) {
-  res.result = {
-    _links: {}
-  };
+        const endorsers = s.endorsers;
+        delete s.endorsers;
+        s.endorsers = endorsers;
 
-  if (req.query.profiles && req.query.skills && req.query.type) {
-    var parsed = std.url.parse(req.url, true);
+        if (s.endorsers && s.endorsers.length) {
+          const sendorsers = index(items, 'id', true, e => true);
 
-    delete parsed.query.path;
+          s.endorsers = formatProfileIds(s.endorsers, p => {
+            const formatted = format.profile(p);
+            if (sendorsers[p.id]) {
+              formatted.super = true;
+            }
+            return formatted;
+          });
+        } else {
+          s.endorsers = [];
+        }
 
-    res.result = {
-      uri: req.baseUri + '/needs',
-      method: 'POST',
-      json: true,
-      body: parsed.query,
-      _links: {
-        create: {
-          href: {
-            path: '/needs?create',
-            joinQuery: true
+        s._links = {
+          'skills.name': { href: `/skills.name/${encodeURIComponent(name)}` },
+        };
+
+        return s;
+      }).sort((a, b) => {
+        if (a.percentile === 'N/A') return 1;
+        if (a.percentile !== b.percentile) return a.percentile - b.percentile;
+        return (b.endorsementCount || 0) - (a.endorsementCount || 0);
+      }),
+      positions: positions.map(s => {
+        if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
+        if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
+        s._links = {
+          'positions.companyName': {
+            title: s.companyName,
+            href: `/positions.companyName/${encodeURIComponent(normalize(s.companyName))}`,
           },
-          rel: 'nofollow'
+          'positions.title': {
+            title: s.title,
+            href: `/positions.title/${encodeURIComponent(normalize(s.title))}`,
+          },
         }
+        return s;
+      }),
+      friends: formatProfileIds(friends),
+      endorsed: formatProfileIds(endorsees),
+      endorsers: formatProfileIds(endorsers),
+      network: formatProfileIds(network),
+    }, {
+      _links: {
+        linkedin: {
+          href: profileUrl,
+          title: 'LinkedIn profile',
+        },
+      },
+    });
+
+    return result;
+  }
+
+  function getSkillRelatedSkillsMap({ name }) {
+    const matrice = indices.skillsMatrice[name];
+    if (!matrice) return [];
+
+    return matrice.keys
+      .sort((a, b) =>
+            indices.skillsMatrice[name].skills[b] -
+            indices.skillsMatrice[name].skills[a])
+      .map(child => {
+        const count = indices.skillsMatrice[name].skills[child];
+        return { name: child, count };
+      });
+  }
+
+  function getSkillRelatedSkills({ name }) {
+    const related = getSkillRelatedSkillsMap({ name });
+
+    return related.map(({ name, count }) => {
+      const relatedCount = indices['skills.name'][name].length;
+      return `${name} (${count}/${relatedCount}, ${percentage(count / relatedCount)}%)`;
+    });
+  }
+
+  function getSkillTopSkills({ name }) {
+    const topSkills = indices.topSkills[name];
+    if (!topSkills) return [];
+
+    return topSkills
+      .sort((a, b) =>
+            indices.skillsMatrice[name].skills[b] -
+            indices.skillsMatrice[name].skills[a])
+      .map(child => {
+        const count = indices.skillsMatrice[name].skills[child];
+        const childCount = indices['skills.name'][child].length;
+        return `${child} (${count}/${childCount}, ${percentage(count / childCount)}%)`;
+      });
+  }
+
+  function getTopSkills() {
+    const topSkills = filterAndSortByCountOne(
+      mapField(
+        flatMap(
+          Object.keys(indices.skillsMatrice),
+          skill => {
+            const matrice = indices.skillsMatrice[skill];
+            const skills = Object.keys(matrice.skills);
+            return skills;
+          }
+        ),
+        null,
+        e => null
+      )
+    );
+
+    return index(topSkills, 'name', true, e => e.count);
+  }
+
+  function getTopSkillsN2({ c = 2 }) {
+    const topSkills = reduceObject(indices.skillsMatrice, (r, matrice, name) => {
+      const topRelated = flatMap(
+        matrice.keys.filter(key => matrice.skills[key] > c),
+        skill => {
+          const skillMatrice = indices.skillsMatrice[skill];
+          if (!skillMatrice) return false;
+
+          return skillMatrice.keys.filter(key => matrice.skills[key] > c);
+        }
+      );
+
+      const items = unique(topRelated).filter(e => e);
+
+      if (items.length) {
+        r.push({ name, items });
+      }
+
+      return r;
+    }, []);
+
+    return topSkills;
+  }
+
+  function getMapCollection(collection) {
+    return ({ q }) => {
+      let results = maps[collection];
+
+      if (q) {
+        q = normalize(q);
+        results = results.filter(t => t.name.includes(q));
+      }
+
+      const total = maps[collection].length;
+      const count = results.length;
+
+      return Object.assign({
+        total,
+      }, count !== total ? {
+        count,
+        percentage: percentage(count / total),
+      } : {}, {
+        _embedded: {
+          [collection]: sortByCountDesc(results).map(format[collection](count)),
+        },
+      });
+    };
+  }
+
+  function getMapCollectionItemRelated(collection) {
+    return ({ name, related }) => {
+      name = normalize(name);
+
+      const profiles = indices[collection][name];
+      if (!profiles) throw httpError(404, `No such ${collection}`);
+
+      const count = profiles.length;
+      if (!count) return 'No results';
+
+      const current = `${collection}=${encodeURIComponent(name)}&`;
+
+      const items = related === 'skills.name' ?
+              getSkillRelatedSkillsMap({ name }) :
+            mapField(profiles, related, unique);
+
+      return {
+        field: related,
+        count: items.length,
+        _links: {
+          self: { href: `/${collection}/${name}/related/${related}` },
+          [related]: sortByCountDesc(items).map(format[related](count, current)),
+        },
+      };
+    };
+  }
+
+  function getMapCollectionItem(collection) {
+    const getRelated = getMapCollectionItemRelated(collection);
+
+    return ({ name }) => {
+      name = normalize(name);
+
+      const profiles = indices[collection][name];
+      if (!profiles) throw httpError(404, `No such ${collection}`);
+
+      const count = profiles.length;
+      if (!count) return 'No results';
+
+      const current = `${collection}=${encodeURIComponent(name)}&`;
+
+      const fields = [
+        'skills.name',
+        'positions.companyName',
+        'positions.title',
+      ];
+
+      return {
+        name,
+        _links: {
+          profile: {
+            href: `/profiles?${current}`,
+            count,
+          },
+        },
+        _embedded: fields.reduce((r, field) => {
+          r[field] = getRelated({ name, related: field });
+          r[field]._links[field] = r[field]._links[field].slice(0, 10);
+          return r;
+        }, {}),
+      };
+    };
+  }
+
+  function getSearches() {
+    const file = `./data/search.json`;
+
+    let content;
+    try {
+      content = JSON.parse(read(file));
+    } catch (e) {
+      content = {};
+    }
+
+    return mapObject(content, (value, key) => {
+      value = JSON.parse(value);
+      value.query = JSON.parse(decodeURIComponent(value.query));
+
+      return {
+        key,
+        value,
+        href: `/savedSearches/${key}`,
+      };
+    });
+  }
+
+  function getSearch({ name }) {
+    const searches = getSearches();
+
+    const object = searches.filter(e => e.key === name)[0];
+    if (!object) return httpError(404, 'no such saved search');
+
+    const profiles = getProfiles(object.value.query);
+
+    return {
+      title: name,
+      query: object.value.query,
+      descrition: object.value.description,
+      count: profiles.count,
+      _embedded: {
+        profiles: profiles._embedded.profile,
       }
     };
   }
 
-  var links = res.result._links || {};
+  function getSuggest({ q }) {
+    q = normalize(q);
 
-  var query = Object.keys(req.query);
+    const fields = [
+      'name',
+      'skills.name',
+      'positions.companyName',
+      'positions.title'
+    ];
 
-  var params = [ 'profiles', 'skills', 'type' ];
+    const matches = fields.reduce((r, field) => {
 
-  params.reduce(function (links, type) {
-    var link = {
-      title: type,
-      href: '/index/' + type + '?next=' + encodeURIComponent(req.uri)
-    };
+      const exact = indices[field][q] || [];
+      r.exact.push(Object.assign({
+        field,
+        count: exact.length,
+      }, field !== 'name' ? {
+        href: `/${field}/${encodeURIComponent(q)}`,
+      } : {
+        href: `/profiles?name=${encodeURIComponent(q)}`,
+        profiles: exact.map(({ name: title, id }) => ({
+          title,
+          href: `/profiles/${id}`,
+        })),
+      }));
 
-    if (req.query[type]) {
-      link.rel = 'nofollow';
-    }
+      const partial = maps[field].filter(e => e.name !== q && e.name.includes(q));
+      r.partial.push(Object.assign({
+        field,
+        count: partial.length,
+      }, {
+        href: field !== 'name' ?
+          `/${field}?q=${encodeURIComponent(q)}` :
+          `/profiles?name=${encodeURIComponent(q)}`,
+      }, {
+        items: sortByCountDesc(partial.map(({ name, count }) => ({
+          title: name,
+          href: field !== 'name' ?
+            `/${field}/${encodeURIComponent(name)}` :
+            `/profiles?name=${encodeURIComponent(name)}`,
+          count,
+        }))).slice(0, 3),
+      }));
+      return r;
+    }, { exact: [], partial: [] });
 
-    links['choose' + capitalize(type)] = link;
+    matches.exact = filterByCountPositive(sortByCountDesc(matches.exact));
 
-    return links;
-  }, links);
+    matches.partial = filterByCountPositive(matches.partial.sort((a, b) => {
+      return b.items.reduce((r, e) => Math.max(r, e.count), 0) -
+        a.items.reduce((r, e) => Math.max(r, e.count), 0);
+    }));
 
-  res.result._links = links;
+    const searches = getSearches();
 
-  next();
-});
+    const sresults = sortByCountDesc(searches.reduce((r, { value: { query }, key }) => {
+      if (normalize(JSON.stringify(query)).includes(q) || normalize(key).includes(q)) {
+        const count = getProfiles(query).count;
+        r.push({ title: key, count, href: `/savedSearches/${key}` });
+      }
+      return r;
+    }, []));
 
-app.use('/forms', formsRouter);
-
-var companiesRouter = express.Router();
-
-companiesRouter.get('/', passResult(function (req, res, next) {
-  fetchAll.companies(next);
-}), function (req, res, next) {
-  var companies = req.result;
-
-  if (req.query.q) {
-    var q = escapeRegExp(req.query.q);
-
-    companies = companies.filter(function (company) {
-      return company.name.match(q);
-    });
-  }
-
-  res.result = {
-    _links: {
-      companies: companies
-    }
-  };
-
-  next();
-});
-
-companiesRouter.get('/:company', function (req, res, next) {
-  return res.redirect('/profiles?' + 'companies' + '=' + req.params.company);
-});
-
-app.use('/companies', companiesRouter);
-
-var internals = {};
-
-internals.needs = {
-  requests: {},
-  proposals: {}
-};
-
-internals.needsTypes = Object.keys(internals.needs);
-
-function getOtherNeedType(needType) {
-  var types = internals.needsTypes.slice();
-
-  types.splice(types.indexOf(needType), 1);
-
-  var otherNeedType = types.shift();
-
-  return otherNeedType;
-}
-
-function createNeeds(req, res, next) {
-  var profiles = asArray(req.body.profiles);
-
-  req.body.skills = asArray(req.body.skills);
-
-  async.map(profiles, function (profileId, callback) {
-    if (! profileId) { return callback; }
-
-    var body = req.body;
-
-    body.profiles = profileId;
-
-    client.create({
-      index: 'matchmakr',
-      type: 'needs',
-      body: body
-    }, callback);
-  }, function (err, results) {
-    if (err) { return next(err); }
-
-    async.map(results, function (result, callback) {
-      fetchOneNeed(result._id, callback);
-    }, function (err, result) {
-      if (err) { return next(err); }
-
-      var fakeResult = {
-        hits: {
-          total: result.length,
-          hits: result
-        }
-      };
-
-      handleNeedsResults(next)(null, fakeResult);
-    });
-  });
-}
-
-function addNeedsLinks(links, needs) {
-  return needs.reduce(function (links, need) {
-    var id = need.profiles;
-    var needType = need.type;
-
-    if (! links[needType]) {
-      links[needType] = [];
-    }
-
-    links[needType].push({
-      href: '/needs/' + need._id
-    });
-
-    return links;
-  }, links);
-}
-
-function sendNeedsResults(req, res, next) {
-  var needs = req.result;
-
-  var needsLinks = {};
-
-  addNeedsLinks(needsLinks, needs);
-
-  Object.keys(mappings.needs.properties).reduce(function (needsLinks, field) {
-    if (field === 'profile') {
-      field += 's';
-    }
-
-    needsLinks['searchBy' + capitalize(field)] = {
-      href: '/index/' + field + '?next=' + encodeURIComponent(req.uri)
-    };
-
-    return needsLinks;
-  }, needsLinks);
-
-  needsLinks.form = {
-    href: '/forms/needs'
-  };
-
-  res.result = {
-    total: needs.total,
-    _links: needsLinks,
-    _embedded: {
-      needs: needs.map(addNeedLinks)
-    }
-  };
-
-  next();
-}
-
-var needsRouter = express.Router();
-
-needsRouter.post('/', passResult(createNeeds), sendNeedsResults);
-
-function createNeedsFromGet(req, res, next) {
-  delete req.query.create;
-
-  req.body = req.query;
-
-  createNeeds(req, res, next);
-}
-
-function getAllNeeds(req, res, next) {
-  if ('create' in req.query) {
-    return createNeedsFromGet(req, res, next);
-  }
-
-  if (req.query.skills || req.query.profiles) {
-    return fetchAllNeedsBy(req.query, next);
-  }
-
-  fetchAllNeeds(req.query.type, next);
-}
-
-needsRouter.get('/', passResult(getAllNeeds), sendNeedsResults);
-
-function buildNeedLinks(need) {
-  var skillsLinks = need.skills.map(function (skill) {
     return {
-      title: skill,
-      href: '/skills/' + encodeURIComponent(skill)
+      _links: Object.assign(
+        { search: sresults },
+        matches
+      ),
     };
-  });
+  }
 
-  var links = {
-    profile: {
-      href: getProfileUrl(need.profiles)
-    },
-    matching: {
-      href: './matching'
-    },
-    similar: {
-      href: './similar'
-    },
-    matchingProfiles: {
-      href: '/profiles?' + need.skills.map(function (skill) {
-        return 'skills=' + encodeURIComponent(skill);
-      }).join('&')
-    },
-    skills: skillsLinks
-  };
+  function saveSomething(body) {
+    const { table, key, value } = body;
+    if (!table || !key || !value) throw httpError(400, 'missing parameters');
 
-  links[need.type] = {
-    href: '/needs?type=' + need.type
-  };
+    const file = `./data/${normalize(table)}.json`;
 
-  return links;
-}
-
-function addNeedLinks(need) {
-  var links = buildNeedLinks(need);
-
-  need._links = links;
-
-  return need;
-}
-
-function buildNeedResource(need) {
-  need = need._source;
-
-  return addNeedLinks(need);
-}
-
-function handleNeedsResults(next) {
-  return function (err, result) {
-    if (err) { return next(err); }
-
-    var needs = result.hits.hits.map(function (need) {
-      need._source._id = need._id;
-      return need._source;
-    }).sort(stringSortByField('type'));
-
-    needs.total = result.hits.total;
-
-    next(null, needs);
-  };
-}
-
-function getOneNeed(req, res, next) {
-  var id = req.params.needId;
-
-  fetchOneNeed(id, function (err, result) {
-    if (err) { return next(err); }
-
-    if (! result) {
-      return res.sendStatus(404);
+    let content;
+    try {
+      content = JSON.parse(read(file));
+    } catch (e) {
+      content = {};
     }
 
-    req.need = result;
+    content[key] = value;
 
-    next();
-  });
-}
+    write(file, JSON.stringify(content));
 
-needsRouter.param('needId', getOneNeed);
+    return 'ok';
+  }
 
-function sendNeed(req, res, next) {
-  var need = req.need;
+  function inspect({ variable, field }) {
+    return { [field]: get(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
+  }
 
-  var needResource = buildNeedResource(need);
+  app.use(morgan('[:date[iso]] :method :url :status :response-time ms - :res[content-length]'));
+  app.use(bodyParser.json());
+  app.use(bodyParser.urlencoded({ extended: false }));
+  //  app.use(cache());
+  app.use(liveReload());
 
-  res.result = needResource;
+  const routes = [];
 
-  next();
-}
-
-needsRouter.get('/:needId', sendNeed);
-
-function deleteNeed(req, res, next) {
-  client.delete({
-    index: 'matchmakr',
-    type: 'needs',
-    id: req.params.needId
-  }, function (err, result) {
-    if (err) { return next(err); }
-
-    res.result = {
-    };
-
-    next();
-  });
-}
-
-needsRouter.delete('/:needId', deleteNeed);
-
-function fetchAllNeedsBy(query, next) {
-  var mustQuery = Object.keys(query)
-      .filter(inValues(Object.keys(mappings.needs.properties)))
-      .map(function (prop) {
-        var q = {}, qType = {};
-
-        var value = query[prop];
-
-        q[Array.isArray(value) ? 'terms' : 'term'] = qType;
-
-        qType[prop] = query[prop];
-
-        return q;
+  closure(
+    (route, ...middlewares) => {
+      routes.push(route);
+      return app.get(route, ...middlewares);
+    },
+    get => {
+      get('/', function getIndex(req, res) {
+        return res.format({
+          json: () => res.send({
+            _links: routes.reduce((r, route) => {
+              r[route.slice(1) || 'index'] = { href: route };
+              return r;
+            }, {}),
+          }),
+          html: () => res.send(`
+loaded base: ${file}<hr/>
+${mapObject(maps, (items, key) => `total <a href="/${key}">${key}</a>: ${items.length}</a>`).join('<br/>')}<hr/>
+routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>')}
+`),
+        });
       });
 
-  client.search({
-    index: 'matchmakr',
-    type: 'needs',
-    size: 1000,
-    body: {
-      query: {
-        bool: {
-          must: mustQuery
-        }
-      }
+      get('/livereload', () => {});
+      get('/profiles', callWithReqQuery(getProfiles));
+      get('/profiles/:id', callWithReqParams(getProfile));
+
+      get('/name', callWithReqQuery(getMapCollection('name')));
+      get('/name/:name', callWithReqParams(getMapCollectionItem('name')));
+
+      get('/positions.companyName', callWithReqQuery(getMapCollection('positions.companyName')));
+      get('/positions.companyName/:name', callWithReqParams(getMapCollectionItem('positions.companyName')));
+      get('/positions.companyName/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('positions.companyName')));
+
+      get('/positions.title', callWithReqQuery(getMapCollection('positions.title')));
+      get('/positions.title/:name', callWithReqParams(getMapCollectionItem('positions.title')));
+      get('/positions.title/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('positions.title')));
+
+      get('/skills.name', callWithReqQuery(getMapCollection('skills.name')));
+      get('/skills.name/:name', callWithReqParams(getMapCollectionItem('skills.name')));
+      get('/skills.name/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('skills.name')));
+      get('/skills.name/:name/top', callWithReqParams(getSkillTopSkills));
+
+      get('/topSkills', callWithReqQuery(getTopSkills));
+      get('/topSkillsN2', callWithReqQuery(getTopSkillsN2));
+
+      get('/suggest/:q', callWithReqParams(getSuggest));
+      get('/savedSearches', callWithReqQuery(getSearches));
+      get('/savedSearches/:name', callWithReqParams(getSearch));
+      app.post('/save', callWithReqBody(saveSomething));
+
+      app.get('/inspect/:variable/:field', callWithReqParams(inspect));
+      app.get('/stats', (req, res) => res.send(process.memoryUsage()));
     }
-  }, handleNeedsResults(next));
-}
+  );
 
-function fetchAllNeeds(needType, next) {
-  if (! next) {
-    next = needType;
-    needType = '';
-  }
+  app.use((err, req, res, next) => res.status(err.code || 500).send(`
+${err.message}<hr/>
+<code>${(err.stack || '').replace(/\n/g, '<br/>')}</code><hr/>
+<code>${JSON.stringify(err.data)}</code>
+`));
 
-  client.search({
-    index: 'matchmakr',
-    type: 'needs',
-    size: 1000,
-    body: {
-      query: needType ? {
-        terms: {
-          type: asArray(needType)
-        }
-      }: {
-        match_all: {}
-      }
-    }
-  }, handleNeedsResults(next));
-}
-
-function fetchOneNeed(id, next) {
-  client.get({
-    index: 'matchmakr',
-    type: 'needs',
-    size: 1,
-    id: id
-  }, function (err, result) {
-    if (err) {
-      if (err.message === 'Not Found') {
-        return next(null, null);
-      }
-
-      return next(err);
-    }
-
-    next(null, result);
-  });
-}
-
-function fetchSimilarNeeds(req, res, next) {
-  var need = req.need._source;
-  var id = req.need._id;
-
-  client.search({
-    index: 'matchmakr',
-    type: 'needs',
-    size: 1000,
-    body: {
-      query: {
-        bool: {
-          must: [{
-            terms: {
-              skills: need.skills
-            }
-          }, {
-            terms: {
-              types: [ need.type ]
-            }
-          }],
-          must_not: [{
-            ids: {
-              values: [ id ]
-            }
-          }]
-        }
-      }
-    }
-  }, handleNeedsResults(next));
-}
-
-function fetchMatchingNeeds(req, res, next) {
-  var need = req.need._source;
-
-  var needType = getOtherNeedType(need.type);
-
-  client.search({
-    index: 'matchmakr',
-    type: 'needs',
-    size: 1000,
-    body: {
-      query: {
-        bool: {
-          must: [{
-            terms: {
-              skills: need.skills
-            }
-          }, {
-            term: {
-              type: needType
-            }
-          }]
-        }
-      }
-    }
-  }, handleNeedsResults(next));
-}
-
-function fetchProfileNeeds(profile, needTypes, next) {
-  client.search({
-    index: 'matchmakr',
-    type: 'needs',
-    size: 1000,
-    body: {
-      query: {
-        bool: {
-          must: [{
-            terms: {
-              profiles: [ profile.id ]
-            }
-          }, {
-            terms: {
-              type: asArray(needTypes)
-            }
-          }]
-        }
-      }
-    }
-  }, handleNeedsResults(next));
-}
-
-needsRouter.get('/:needId/matching', passResult(fetchMatchingNeeds), sendNeedsResults);
-
-needsRouter.get('/:needId/similar', passResult(fetchSimilarNeeds), sendNeedsResults);
-
-app.use('/needs', needsRouter);
-
-function fetchAllProfilesBy(query, next) {
-  var shouldQuery = Object.keys(query)
-      .filter(inValues(Object.keys(mappings.profile.properties)))
-      .reduce(function (shoulds, prop) {
-        var value = query[prop];
-
-        asArray(value).forEach(function (value) {
-          var q = { term: {} };
-
-          q.term[prop] = value;
-
-          shoulds.push(q);
-        });
-
-        return shoulds;
-      }, []);
-
-  client.search({
-    index: 'matchmakr',
-    type: 'profile',
-    size: 1000,
-    body: {
-      query: {
-        bool: {
-          should: shouldQuery,
-          'minimum_should_match': shouldQuery.length
-        }
-      }
-    }
-  }, handleProfilesResults(next));
-}
-
-function getAllProfiles(req, res, next) {
-  if (req.query.profiles) {
-    return res.redirect('/' + 'profiles' + '/' + encodeURIComponent(req.query.profiles));
-  }
-
-  if (req.query.skills || req.query.companies || req.query.name) {
-    return fetchAllProfilesBy(req.query, next);
-  }
-
-  if (req.query.q) {
-    return fetchAll.profiles(req.query.q, next);
-  }
-
-  countAll.profiles(next);
-}
-
-var profilesRouter = express.Router();
-
-profilesRouter.get('/', passResult(getAllProfiles), sendProfilesResults);
-
-function getOneProfile(req, res, next) {
-  var id = req.params.profileId;
-
-  fetchOneProfile(id, function (err, result) {
-    if (err) { return next(err); }
-
-    if (result.hits.total === 0) {
-      return res.sendStatus(404);
-    }
-
-    req.profile = result.hits.hits[0];
-
-    next();
-  });
-}
-
-profilesRouter.param('profileId', getOneProfile);
-
-function buildProfileLinks(profile) {
-  var skillsLinks = profile.skills.map(function (skill) {
-    return {
-      title: skill,
-      href: '/skills/' + encodeURIComponent(skill)
-    };
+  app.listen(port, () => {
+    startTimer.check();
+    console.info(`${file} running on port ${port}`);
   });
 
-  var companiesLinks = profile.companies.map(function (company) {
-    return {
-      title: company,
-      href: '/companies/' + encodeURIComponent(company)
-    };
-  });
-
-  return {
-    self: {
-      title: profile.name,
-      href: '.'
-    },
-    collection: {
-      href: '/profiles'
-    },
-    'needs': {
-      href: './needs'
-    },
-    skills: skillsLinks,
-    companies: companiesLinks
-  };
+  return app;
 }
 
-profilesRouter.get('/:profileId', sendProfile);
+let port = 3000;
 
-profilesRouter.get('/:profileId/needs', function (req, res) {
-  res.redirect('/needs?profiles=' + req.params.profileId);
+readdir('profiles', (err, profiles) => {
+  const apps = profiles
+          .filter(file => file.match('json'))
+//          .filter(file => file.match('huitre'))
+          .filter(file => file.match('aka'))
+//          .filter(file => file.match('bob'))
+//          .filter(file => file.match('klad'))
+          .map(profile => {
+            launch(profile, port);
+            port += 1;
+          });
 });
-
-app.use('/profiles', profilesRouter);
-
-app.use(linksAbsolutizer({
-  rootPath: '/',
-  embed: false
-}));
-
-app.use(function (req, res, next) {
-  if (req.accepts(['html', 'json']) === 'json' || req.query.format === 'json') {
-    return res.json(res.result);
-  }
-
-  res.header('Content-Type', 'text/html');
-  res.send(formatter.jsonToHTML(res.result, null, req.uri));
-});
-
-std.http.createServer(app).listen(3000);
-
-var options = {
-  key: std.fs.readFileSync('ssl/test_key.pem'),
-  cert: std.fs.readFileSync('ssl/test_cert.pem')
-};
-
-if (false) {
-  std.https.createServer(options, app).listen(8888);
-}
