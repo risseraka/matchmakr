@@ -3,105 +3,13 @@
 const { readdir, readFileSync: read, writeFileSync: write } = require('fs');
 const qs = require('querystring');
 
+// Utils
+
 function pluck(obj/*, ...fields*/) {
   if (!obj) return {};
 
   const fields = Array.prototype.slice.call(arguments, 1);
   return fields.reduce((r, f) => (obj[f] && (r[f] = obj[f]), r), {});
-}
-
-function timer(inLabel) {
-  inLabel = `${inLabel || 'time'}`;
-
-  let label;
-
-  const timer = {
-    buildLabel(newLabel) {
-      return label = newLabel && `${inLabel}:${newLabel}` || inLabel;
-    },
-    start(newLabel) {
-      label = timer.buildLabel(newLabel);
-
-      console.time(label);
-
-      return timer;
-    },
-    check(newLabel) {
-      console.timeEnd(label);
-
-      label = timer.buildLabel(newLabel);
-
-      console.time(label);
-
-      return timer;
-    },
-  };
-  return timer;
-}
-
-function liveReload() {
-  const scriptTag = `<script type="text/javascript">
-function checkReload(etag) {
-  fetch(new Request('/livereload')).catch(() => window.location.reload());
-}
-checkReload();
-</script>`;
-
-  return (req, res, next) => {
-    const send = res.send.bind(res);
-    //  res.send = str => send(liveReload + (str || ''));
-    next();
-  };
-}
-
-function cache() {
-  const memo = {};
-  return (req, res, next) => {
-    if (req.method !== 'GET') return next();
-
-    const send = res.send.bind(res);
-
-    if (!('nocache' in req.query) && memo[req.url]) {
-      return send(memo[req.url]);
-    }
-
-    res.send = result => {
-      if (!memo[req.url]) memo[req.url] = result;
-
-      send(result);
-    };
-
-    next();
-  };
-}
-
-function httpError(code, message) {
-  const e = new Error(message);
-  e.code = code;
-  throw e;
-}
-
-function callWithReq(field, func) {
-  return (req, res) => {
-    const result = func(req[field]);
-
-    res.format({
-      html: () => res.send(stringifyToHTML(result)),
-      default: () => res.send(result),
-    });
-  };
-}
-
-function callWithReqParams(func) {
-  return callWithReq('params', func);
-}
-
-function callWithReqQuery(func) {
-  return callWithReq('query', func);
-}
-
-function callWithReqBody(func) {
-  return callWithReq('body', func);
 }
 
 function memoize(func) {
@@ -113,14 +21,27 @@ function memoize(func) {
   };
 }
 
+// Stats
+
 function decimal(n, digit) {
   const pow = Math.pow(10, digit);
   return Math.floor(n * pow) / pow;
 }
 
-function percentage(n) {
-  return decimal(n * 100, 2);
+function percentage(n, precision = 2) {
+  return decimal(n * Math.pow(10, precision), precision);
 }
+
+function percentile(arr, value, precision = 10, min = 0.05, minPrecision = 5) {
+  if (!arr || !value) return 'N/A';
+
+  const index = arr.indexOf(value);
+  const p = index / arr.length;
+
+  return Math.ceil(p * 100 / (p < min ? minPrecision : precision)) * (p < min ? minPrecision : precision) || 1;
+}
+
+// Strings
 
 // http://stackoverflow.com/questions/990904/remove-accents-diacritics-in-a-string-in-javascript
 function normalizeW(str) {
@@ -197,6 +118,23 @@ function compareInts(a, b) {
   return (a || 0) - (b || 0);
 }
 
+function opposite(a) {
+  return a * -1;
+}
+
+function curry(func) {
+  return (...first) => {
+    return (...then) => func(...first, ...then);
+  };
+}
+
+function compose(func, ...funcs) {
+  return (...args) => {
+    const result = func(...args);
+    return funcs.reduce((r, func) => func(r), result);
+  };
+}
+
 function toNumber(value) {
   return Number.isNaN(+value) ? -1 : +value;
 }
@@ -217,20 +155,36 @@ function flatMap(arr, func) {
   return [].concat(...arr.map(func));
 }
 
-function pushIn(obj, field, values, unique) {
+function pushIn(obj, field, values, unique = false, merge = false) {
   if (unique) {
     obj[field] = values;
     return;
   }
 
-  if (!obj[field]) {
-    obj[field] = [];
-  }
-  if (Array.isArray(values)) {
-    Array.prototype.push.apply(obj[field], arrayify(values));
+  if (merge) {
+    if (!obj[field]) {
+      obj[field] = values;
+    } else {
+      if (Array.isArray(values)) {
+        Array.prototype.push.apply(obj[field], values);
+      } else if (typeof values === 'object') {
+        obj[field] = Object.assign(obj[field], values);
+      } else {
+        obj[field].push(values);
+      }
+    }
   } else {
+    if (!obj[field]) {
+      obj[field] = [];
+    }
     obj[field].push(values);
   }
+}
+
+function forEachObject(obj, func) {
+  if (!obj) return obj;
+
+  return Object.keys(obj).forEach(key => func(obj[key], key));
 }
 
 function reduceObject(obj, func, acc) {
@@ -305,6 +259,121 @@ function mapField(profiles, field, formatItems = e => e, formatItem) {
   return map;
 }
 
+// Timer module
+
+function timer(inLabel) {
+  inLabel = `${inLabel || 'time'}`;
+
+  let label;
+
+  const timer = {
+    buildLabel(newLabel) {
+      return label = newLabel && `${inLabel}:${newLabel}` || inLabel;
+    },
+    start(newLabel) {
+      label = timer.buildLabel(newLabel);
+
+      console.time(label);
+
+      return timer;
+    },
+    check(newLabel) {
+      console.timeEnd(label);
+
+      label = timer.buildLabel(newLabel);
+
+      console.time(label);
+
+      return timer;
+    },
+  };
+  return timer;
+}
+
+// Middlewares
+
+// Error handler middleware
+
+function httpError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  throw e;
+}
+
+function errorHandler(err, req, res, next) {
+  res.status(err.code || 500).format({
+    html: () => res.send(`
+${err.message}<hr/>
+<code>${(err.stack || '').replace(/\n/g, '<br/>')}</code><hr/>
+<code>${JSON.stringify(err.data)}</code>
+`),
+    default: () => res.send(err),
+  });
+}
+
+// Live reload middleware
+
+function liveReload() {
+  const scriptTag = `<script type="text/javascript">
+function checkReload(etag) {
+  fetch(new Request('/livereload')).catch(() => window.location.reload());
+}
+checkReload();
+</script>`;
+
+  return (req, res, next) => {
+    const send = res.send.bind(res);
+    //  res.send = str => send(liveReload + (str || ''));
+    next();
+  };
+}
+
+// Cache middleware
+
+function cache() {
+  const memo = {};
+  return (req, res, next) => {
+    if (req.method !== 'GET') return next();
+
+    const send = res.send.bind(res);
+
+    if (!('nocache' in req.query) && memo[req.url]) {
+      return send(memo[req.url]);
+    }
+
+    res.send = result => {
+      if (!memo[req.url]) memo[req.url] = result;
+
+      send(result);
+    };
+
+    next();
+  };
+}
+
+function callWithReq(field, func) {
+  return (req, res) => {
+    const result = func(req[field]);
+
+    res.format({
+      html: () => res.send(stringifyToHTML(result)),
+      default: () => res.send(result),
+    });
+  };
+}
+
+function callWithReqParams(func) {
+  return callWithReq('params', func);
+}
+
+function callWithReqQuery(func) {
+  return callWithReq('query', func);
+}
+
+function callWithReqBody(func) {
+  return callWithReq('body', func);
+}
+
 function stringifyToHTML(obj) {
   if (typeof obj !== 'object') {
     return obj !== undefined && obj !== null ? obj.toString() : '';
@@ -338,6 +407,8 @@ function Search(haystack, exclude = []) {
 }
 
 function mergeQueries(target, query) {
+  console.log(target, query);
+
   return reduceObject(query, (r, value, field) => {
     if (field == '') {
       r.q = value;
@@ -356,7 +427,12 @@ function parseQuery(q) {
       const value = (e[1] || e[0]).split(',');
       const field = !e[1] ? '' : e[0];
 
-      pushIn(r, field, value);
+      console.log(r, field, value, Array.isArray(value));
+
+      pushIn(r, field, value, false, true);
+
+      console.log(r);
+
       return r;
     }, { '': [] });
 }
@@ -378,7 +454,22 @@ function filterField(arr, field, value) {
 
 const filterAndSortByCountOne = arr => filterByCountOne(sortByCountDesc(arr));
 
-// Init data
+function filterProfiles(profiles, field, value, greedy = true) {
+  const values = arrayify(value).map(normalize);
+
+  return profiles.filter(p => {
+    const pValues = get(p, field);
+
+    // match all values
+    if (greedy) {
+      const matches = values.filter(v => pValues.some(s => normalize(s) === v));
+      return matches.length === values.length;
+    }
+
+    // match at least one value
+    return values.some(v => pValues.some(s => normalize(s) === v));
+  });
+}
 
 function formatLine(field) {
   return (c, current = '') => s => {
@@ -388,12 +479,23 @@ function formatLine(field) {
       title: s.name,
       _links: {
         profile: {
-          href: `/profiles?${current}${field}=${name}`,
           count: s.count,
           percentage: c ? percentage(s.count / c) : 'N/A',
+          href: `/profiles?${current}${field}=${name}`,
         },
       },
     };
+  };
+}
+
+function formatRelations({ id, count, friends, endorsers, endorsees, network }) {
+  return {
+    id,
+    count,
+    endorsers: endorsers.length,
+    endorsees: endorsees.length,
+    network: network.length,
+    friends: friends.length,
   };
 }
 
@@ -403,12 +505,11 @@ const format = {
   'skills.name': formatLine('skills.name'),
   'positions.companyName': formatLine('positions.companyName'),
   'positions.title': formatLine('positions.title'),
+  relations: () => formatRelations,
 };
 
-function launch(file, port) {
-  console.log(`launching '${file}' on port ${port}`);
 
-  const startTimer = timer(`${file} started in`).start();
+function prepareData(file) {
   const time = timer().start('profiles');
 
   const profiles = require(`./profiles/${file}`).sort((a, b) => {
@@ -427,24 +528,6 @@ function launch(file, port) {
 
   time.check('mapping');
 
-  function filterProfiles(profiles, field, value, greedy = true) {
-    const values = arrayify(value).map(normalize);
-
-    return profiles.filter(p => {
-      const pValues = get(p, field);
-
-      // match all values
-      if (greedy) {
-        const matches = values.filter(v => pValues.some(s => normalize(s) === v));
-        return matches.length === values.length;
-      }
-
-      // match at least one value
-      return values.some(v => pValues.some(s => normalize(s) === v));
-    });
-  }
-
-
   const search = Search(profiles, ['profileUrl']);
 
   const maps = {
@@ -455,48 +538,60 @@ function launch(file, port) {
     'positions.title': mapField(profiles, 'positions.title', unique),
   };
 
-  time.check('endorsers');
+  time.check('endorsements');
 
   function buildEndorsements() {
     const endorsements = profiles.reduce(
       (r, p) => p.skills.reduce(
-        (r, s) => s.endorsers.reduce(
-          (r, endorser) => {
+        (r, s) => {
+          const name = normalize(s.name);
+
+          pushIn(r.skilled, name, { [p.id]: s }, false, true);
+
+          if (s.endorsementCount) {
+            pushIn(r.endorsements, name, s.endorsementCount);
+          }
+
+          return s.endorsers.reduce((r, endorser) => {
             pushIn(r.endorsers, endorser, p.id);
 
             pushIn(r.endorsees, p.id, endorser);
             return r;
-          }, r), r
-      ), { endorsers: {}, endorsees: {} }
+          }, r);
+        }, r
+      ), { endorsements: {}, skilled: {}, endorsers: {}, endorsees: {} }
     );
+
+    forEachObject(endorsements.endorsements, endorsements => endorsements.sort(compose(compareInts, opposite)));
 
     return endorsements;
   }
 
-  const { endorsers, endorsees } = buildEndorsements();
+  const endorsements = buildEndorsements();
 
-  const indices = {
-    profiles: profiles.index,
-    name: maps.name.index,
-    'skills.name': maps['skills.name'].index,
-    'positions.companyName': maps['positions.companyName'].index,
-    'positions.title': maps['positions.title'].index,
-    endorsers,
-    endorsees,
-  };
+  const indices = Object.assign(
+    {
+      profiles: profiles.index,
+      name: maps.name.index,
+      'skills.name': maps['skills.name'].index,
+      'positions.companyName': maps['positions.companyName'].index,
+      'positions.title': maps['positions.title'].index,
+    },
+    endorsements
+  );
 
   time.check('network');
 
-  function buildNetwork() {
+  function buildRelations() {
     const time = timer('network').start('all');
 
-    const allEndorsees = Object.keys(endorsees);
-    const allEndorsers = Object.keys(endorsers);
+    const allEndorsees = Object.keys(indices.endorsees);
+    const allEndorsers = Object.keys(indices.endorsers);
     const all = unique(union(allEndorsees, allEndorsers, get(profiles, 'id')).map(id => +id));
 
     time.check('map');
 
-    const networks = all.map(a => {
+    const relations = all.map(a => {
       const profile = indices.profiles[a] || { id: +a };
 
       const { id, name = '' } = profile;
@@ -506,20 +601,22 @@ function launch(file, port) {
       const connecteds = unique(union(pendorsers, pendorsees));
       const friends = intersection(pendorsers, pendorsees);
 
-      return { id, name, friends, endorsers: pendorsers, endorsees: pendorsees, connecteds };
+      const count = connecteds.length;
+
+      return { id, count, name, friends, endorsers: pendorsers, endorsees: pendorsees, connecteds };
     });
 
     time.check('index');
 
-    networks.index = index(networks, 'id', true);
+    relations.index = index(relations, 'id', true);
 
     time.check('intersection');
 
-    networks.forEach(f => {
+    relations.forEach(f => {
       const { id, friends, connecteds } = f;
 
       const network = connecteds.filter(
-        p => intersection(networks.index[p].connecteds, connecteds).length
+        p => intersection(relations.index[p].connecteds, connecteds).length
       );
 
       f.network = network;
@@ -527,16 +624,17 @@ function launch(file, port) {
 
     time.check('sort');
 
-    networks.sort((a, b) => compareInts(b.network.length, a.network.length));
+    relations.sort((a, b) => compareInts(b.network.length, a.network.length));
 
     time.check();
 
-    return networks;
+    return relations;
   }
 
-  const networks = buildNetwork();
+  const relations = buildRelations();
 
-  indices.networks = networks.index;
+  maps.relations = relations;
+  indices.relations = relations.index;
 
   time.check('skillsMatrice');
 
@@ -608,13 +706,17 @@ function launch(file, port) {
 
   time.check('skillsMap');
 
-  // App setup
+  return { profiles, search, maps, indices };
+}
 
-  const express = require('express');
-  const bodyParser = require('body-parser');
-  const morgan = require('morgan');
+function launch(file, port) {
+  console.log(`launching '${file}' on port ${port}`);
 
-  const app = express();
+  const startTimer = timer(`${file} started in`).start();
+
+  // Init data
+
+  const { profiles, search, maps, indices } = prepareData(file);
 
   function formatProfileIds(ids, func) {
     if (!ids) return [];
@@ -629,13 +731,150 @@ function launch(file, port) {
     ];
   }
 
-  function formatProfile(profile) {
-    const { id, name } = profile;
-    return name ? `${id}: ${name}` : id;
+  function calcSeniority(positions) {
+    const xp1 = positions.reduce((r, p) => (p.startDate || 0) < (r.startDate || 0) ? p : r);
+    return xp1 && xp1.startDate ?
+      new Date().getFullYear() - new Date(xp1.startDate).getFullYear() :
+      'N/A';
+  }
+
+  function formatProfilePositions(positions) {
+    return positions.map(s => {
+      if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
+      if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
+      s._links = {
+        'positions.companyName': {
+          title: s.companyName,
+          href: `/positions.companyName/${encodeURIComponent(normalize(s.companyName))}`,
+        },
+        'positions.title': {
+          title: s.title,
+          href: `/positions.title/${encodeURIComponent(normalize(s.title))}`,
+        },
+      };
+      return s;
+    });
+  }
+
+  function formatProfileSkills(skills) {
+    return skills.map(skill => {
+      const name = normalize(skill.name);
+
+      const items = indices['skills.name'][name];
+
+      skill.percentile = percentile(indices.endorsements[name], skill.endorsementCount);
+
+      delete skill.superEndorsementCount;
+
+      const endorsers = formatProfileIds(skill.endorsers, p => {
+        const formatted = format.profile(p);
+
+        if (indices.skilled[name][p.id]) {
+          formatted.superEndorser = true;
+          if (!skill.superEndorsementCount) {
+            skill.superEndorsementCount = 0;
+          }
+          skill.superEndorsementCount += 1;
+        }
+
+        return formatted;
+      });
+
+      delete skill.endorsers;
+      skill.endorsers = endorsers;
+
+      skill._links = {
+        'skills.name': { href: `/skills.name/${encodeURIComponent(name)}` },
+      };
+
+      return skill;
+    }).sort((a, b) => {
+      if (a.percentile === 'N/A') return 1;
+      if (a.percentile !== b.percentile) return a.percentile - b.percentile;
+      return (b.endorsementCount || 0) - (a.endorsementCount || 0);
+    });
+  }
+
+  function formatProfilesMatches(matches) {
+    return matches ? {
+      matches: reduceObject(matches, (r, { matches, count, score }, key) => {
+        r[key] = {
+          count,
+          score,
+          matches: matches.map(v => Object.assign(
+            pluck(v, 'name', 'endorsementCount', 'percentile', 'superEndorsementCount'),
+            v ? { _links: { href: `/${key}/${encodeURIComponent(normalize(v.name))}` } } : {}
+          )),
+        };
+        return r;
+      }, {}),
+    } : {};
+  }
+
+  function formatProfilesTemplates(query) {
+    return query.q ?
+      {
+        _templates: {
+          default: {
+            title: 'Save search as',
+            method: 'post',
+            action: '/save',
+            properties: [
+              { name: 'table', type: 'hidden', value: 'search' },
+              { name: 'key', type: 'text' },
+              { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
+            ],
+          },
+        },
+      } : {};
+  }
+
+  function computeMatches(results, skillNames) {
+    const skills = skillNames.map(normalize);
+
+    results.forEach(profile => {
+      profile.matches = {};
+
+      const matches = skills.map(name => {
+        const skill = indices.skilled[name][profile.id];
+        if (!skill) return undefined;
+
+        const endorsements = indices.endorsements[name];
+
+        const { endorsementCount } = skill;
+
+        skill.percentile = percentile(endorsements, endorsementCount);
+
+        const superEndorsementCount = (skill.endorsers || []).reduce((r, e) => r + (indices.skilled[name][e] ? 1 : 0), 0);
+        delete skill.superEndorsementCount;
+        if (superEndorsementCount) {
+          skill.superEndorsementCount = superEndorsementCount;
+        }
+
+        return skill;
+      });
+
+      const count = matches.filter(e => e).length;
+
+      const score = Math.pow(10, count + 6) +
+              matches.reduce(
+                (r, e, i) => r + Math.pow(10, matches.length - i) * (e && e.endorsementCount || 0),
+                0
+              );
+
+      profile.matches['skills.name'] = {
+        count,
+        score,
+        matches: matches.filter(e => e),
+      };
+    });
+
+    results = results.sort((a, b) => b.matches['skills.name'].score - a.matches['skills.name'].score);
   }
 
   function getProfiles(query) {
-    let results = JSON.parse(JSON.stringify(profiles));
+    let results = profiles;
+    results.forEach(p => delete p.matches);
 
     if (query.q) {
       query = mergeQueries(query, parseQuery(query.q));
@@ -650,31 +889,19 @@ function launch(file, port) {
       results = results.filter(p => normalize(p.name).includes(query.name));
     }
 
+    console.log(query);
+
     if (query['skills.name']) {
-      const skillName = unique(flatMap(
+      const skillNames = unique(flatMap(
         arrayify(query['skills.name']),
         e => e.split(',')
       ));
 
-      query['skills.name'] = skillName;
+      query['skills.name'] = skillNames;
 
-      results = filterProfiles(results, 'skills.name', skillName, false);
+      results = filterProfiles(results, 'skills.name', skillNames, false);
 
-      const skills = skillName.map(normalize);
-
-      results.forEach(p => {
-        p.matches = {};
-
-        const matches = skills.map(v => p.skills.find(s => normalize(s.name) === v));
-        const count = matches.filter(e => e).length;
-        p.matches['skills.name'] = {
-          count,
-          score: Math.pow(10, count + 6) + matches.reduce((r, e, i) => r + Math.pow(10, matches.length - i) * (e && e.endorsementCount || 0), 0),
-          matches,
-        };
-      });
-
-      results = results.sort((a, b) => b.matches['skills.name'].score - a.matches['skills.name'].score);
+      computeMatches(results, skillNames);
     }
 
     if (query['positions.companyName']) {
@@ -687,130 +914,58 @@ function launch(file, port) {
       results = filterProfiles(results, 'positions.title', title);
     }
 
-    return Object.assign({
-      count: results.length,
-    }, {
-      _embedded: {
-        profile: results.map(({ id, name, matches }) => Object.assign({
-          href: `/profiles/${id}`,
-          title: name,
-        }, matches ? {
-          matches: reduceObject(matches, (r, { matches, count, score }, key) => {
-            r[key] = {
-              count,
-              score,
-              matches: matches.map(v => pluck(v, 'name', 'endorsementCount')),
-            };
-            return r;
-          }, {}),
-        } : {})),
+    return Object.assign(
+      {
+        count: results.length,
       },
-    }, query.q ? {
-      _templates: {
-        default: {
-          title: 'Save search as',
-          method: 'post',
-          action: '/save',
-          properties: [
-            { name: 'table', type: 'hidden', value: 'search' },
-            { name: 'key', type: 'text' },
-            { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
-          ],
+      {
+        _links: {
+          profile: results.map(({ id, name, matches }) => Object.assign(
+            {
+              title: name,
+              href: `/profiles/${id}`,
+            },
+            formatProfilesMatches(matches)
+          )),
         },
       },
-    } : {});
+      formatProfilesTemplates(query)
+    );
   }
 
   function getProfile({ id }) {
     const profile = indices.profiles[id];
     if (!profile) return httpError(404, 'no such profile');
 
-    const { friends, endorsees, endorsers, network } = networks.index[id];
+    delete profile.matches;
 
     let result = JSON.parse(JSON.stringify(profile));
 
     const { positions, skills, profileUrl } = result;
 
-    return Object.assign({
-      id,
-      seniority: closure(
-        positions.reduce((r, p) => (p.startDate || 0) < (r.startDate || 0) ? p : r),
-        xp1 => xp1 && xp1.startDate ?
-          new Date().getFullYear() - new Date(xp1.startDate).getFullYear() :
-          'N/A'
-      )
-    }, result, {
-      skills: skills.map(s => {
-        const name = normalize(s.name);
-
-        const items = indices['skills.name'][name];
-
-        if (s.endorsementCount && items.length > 1) {
-          const endorsements = items
-                  .map(p => toNumber(p.skills.find(s => normalize(s.name) === name).endorsementCount))
-                  .sort((a, b) => compareInts(b, a));
-          const index = endorsements.indexOf(s.endorsementCount);
-          const p = index / endorsements.length;
-          s.percentile = Math.ceil(p * (p < 0.05 ? 20 : 10)) * (p < 0.05 ? 5 : 10) || 1;
-        } else {
-          s.percentile = 'N/A';
-        }
-
-        const endorsers = s.endorsers;
-        delete s.endorsers;
-        s.endorsers = endorsers;
-
-        if (s.endorsers && s.endorsers.length) {
-          const sendorsers = index(items, 'id', true, e => true);
-
-          s.endorsers = formatProfileIds(s.endorsers, p => {
-            const formatted = format.profile(p);
-            if (sendorsers[p.id]) {
-              formatted.super = true;
-            }
-            return formatted;
-          });
-        } else {
-          s.endorsers = [];
-        }
-
-        s._links = {
-          'skills.name': { href: `/skills.name/${encodeURIComponent(name)}` },
-        };
-
-        return s;
-      }).sort((a, b) => {
-        if (a.percentile === 'N/A') return 1;
-        if (a.percentile !== b.percentile) return a.percentile - b.percentile;
-        return (b.endorsementCount || 0) - (a.endorsementCount || 0);
-      }),
-      positions: positions.map(s => {
-        if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
-        if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
-        s._links = {
-          'positions.companyName': {
-            title: s.companyName,
-            href: `/positions.companyName/${encodeURIComponent(normalize(s.companyName))}`,
-          },
-          'positions.title': {
-            title: s.title,
-            href: `/positions.title/${encodeURIComponent(normalize(s.title))}`,
-          },
-        }
-        return s;
-      }),
-      friends: formatProfileIds(friends),
-      endorsed: formatProfileIds(endorsees),
-      endorsers: formatProfileIds(endorsers),
-      network: formatProfileIds(network),
-    }, {
-      _links: {
-        linkedin: {
-          href: profileUrl,
-          title: 'LinkedIn profile',
-        },
+    return Object.assign(
+      {
+        id,
+        seniority: calcSeniority(positions),
       },
-    });
+      result,
+      {
+        skills: formatProfileSkills(skills),
+        positions: formatProfilePositions(positions),
+      },
+      ['friends', 'endorsees', 'endorsers', 'network'].reduce((r, field) => {
+        r[field] = formatProfileIds(indices.relations[id][field]);
+        return r;
+      }, {}),
+      {
+        _links: {
+          linkedin: {
+            href: profileUrl,
+            title: 'LinkedIn profile',
+          },
+        },
+      }
+    );
 
     return result;
   }
@@ -829,15 +984,6 @@ function launch(file, port) {
       });
   }
 
-  function getSkillRelatedSkills({ name }) {
-    const related = getSkillRelatedSkillsMap({ name });
-
-    return related.map(({ name, count }) => {
-      const relatedCount = indices['skills.name'][name].length;
-      return `${name} (${count}/${relatedCount}, ${percentage(count / relatedCount)}%)`;
-    });
-  }
-
   function getSkillTopSkills({ name }) {
     const topSkills = indices.topSkills[name];
     if (!topSkills) return [];
@@ -853,135 +999,114 @@ function launch(file, port) {
       });
   }
 
-  function getTopSkills() {
-    const topSkills = filterAndSortByCountOne(
-      mapField(
-        flatMap(
-          Object.keys(indices.skillsMatrice),
-          skill => {
-            const matrice = indices.skillsMatrice[skill];
-            const skills = Object.keys(matrice.skills);
-            return skills;
-          }
-        ),
-        null,
-        e => null
-      )
-    );
+  function getMapCollection(collection, { q })  {
+    let results = maps[collection];
 
-    return index(topSkills, 'name', true, e => e.count);
-  }
+    if (q) {
+      q = normalize(q);
 
-  function getTopSkillsN2({ c = 2 }) {
-    const topSkills = reduceObject(indices.skillsMatrice, (r, matrice, name) => {
-      const topRelated = flatMap(
-        matrice.keys.filter(key => matrice.skills[key] > c),
-        skill => {
-          const skillMatrice = indices.skillsMatrice[skill];
-          if (!skillMatrice) return false;
+      results = results.filter(t => t.name.includes(q));
+    }
 
-          return skillMatrice.keys.filter(key => matrice.skills[key] > c);
-        }
-      );
+    const total = maps[collection].length;
+    const count = results.length;
 
-      const items = unique(topRelated).filter(e => e);
-
-      if (items.length) {
-        r.push({ name, items });
-      }
-
-      return r;
-    }, []);
-
-    return topSkills;
-  }
-
-  function getMapCollection(collection) {
-    return ({ q }) => {
-      let results = maps[collection];
-
-      if (q) {
-        q = normalize(q);
-        results = results.filter(t => t.name.includes(q));
-      }
-
-      const total = maps[collection].length;
-      const count = results.length;
-
-      return Object.assign({
+    return Object.assign(
+      {
         total,
-      }, count !== total ? {
+      },
+      count !== total ? {
         count,
         percentage: percentage(count / total),
-      } : {}, {
+      } : {},
+      {
         _embedded: {
           [collection]: sortByCountDesc(results).map(format[collection](count)),
         },
-      });
+      }
+    );
+  }
+
+  function getMapCollectionItemRelated(collection, { name, related }) {
+    name = normalize(name);
+
+    const profiles = indices[collection][name];
+    if (!profiles) throw httpError(404, `No such ${collection}`);
+
+    const count = profiles.length;
+    if (!count) return 'No results';
+
+    const current = `${collection}=${encodeURIComponent(name)}&`;
+
+    const items = related === 'skills.name' ?
+            getSkillRelatedSkillsMap({ name }) :
+          mapField(profiles, related, unique);
+
+    return {
+      field: related,
+      count: items.length,
+      _links: {
+        self: { href: `/${collection}/${name}/related/${related}` },
+        [related]: sortByCountDesc(items).map(format[related](count, current)),
+      },
     };
   }
 
-  function getMapCollectionItemRelated(collection) {
-    return ({ name, related }) => {
-      name = normalize(name);
+  function getMapCollectionItem(collection, { name }) {
+    const getRelated = curry(getMapCollectionItemRelated)(collection);
 
-      const profiles = indices[collection][name];
-      if (!profiles) throw httpError(404, `No such ${collection}`);
+    name = normalize(name);
 
-      const count = profiles.length;
-      if (!count) return 'No results';
+    const profiles = indices[collection][name];
+    if (!profiles) throw httpError(404, `No such ${collection}`);
 
-      const current = `${collection}=${encodeURIComponent(name)}&`;
+    const count = profiles.length;
+    if (!count) return 'No results';
 
-      const items = related === 'skills.name' ?
-              getSkillRelatedSkillsMap({ name }) :
-            mapField(profiles, related, unique);
+    const current = `${collection}=${encodeURIComponent(name)}&`;
 
-      return {
-        field: related,
-        count: items.length,
-        _links: {
-          self: { href: `/${collection}/${name}/related/${related}` },
-          [related]: sortByCountDesc(items).map(format[related](count, current)),
+    const fields = [
+      'skills.name',
+      'positions.companyName',
+      'positions.title',
+    ];
+
+    const relatedFields = fields.map(field => {
+      const related = getRelated({ name, related: field });
+      related._links[field] = related._links[field].slice(0, 10);
+      return related;
+    });
+
+    return {
+      name,
+      _links: {
+        profile: {
+          count,
+          href: `/profiles?${current}`,
         },
-      };
-    };
-  }
-
-  function getMapCollectionItem(collection) {
-    const getRelated = getMapCollectionItemRelated(collection);
-
-    return ({ name }) => {
-      name = normalize(name);
-
-      const profiles = indices[collection][name];
-      if (!profiles) throw httpError(404, `No such ${collection}`);
-
-      const count = profiles.length;
-      if (!count) return 'No results';
-
-      const current = `${collection}=${encodeURIComponent(name)}&`;
-
-      const fields = [
-        'skills.name',
-        'positions.companyName',
-        'positions.title',
-      ];
-
-      return {
-        name,
-        _links: {
-          profile: {
-            href: `/profiles?${current}`,
+        related: relatedFields.map(({ field, count, _links }) => {
+          return {
+            field,
             count,
-          },
-        },
-        _embedded: fields.reduce((r, field) => {
-          r[field] = getRelated({ name, related: field });
-          r[field]._links[field] = r[field]._links[field].slice(0, 10);
-          return r;
-        }, {}),
-      };
+            href: _links.self.href,
+          };
+        }),
+      },
+      _embedded: {
+        profiles: closure(
+          getProfiles({ [collection]: name }),
+          profiles => ({
+            profile: {
+              count: profiles.count,
+              href: `/profiles?${current}`,
+              _links: {
+                profiles: profiles._links.profile.slice(0, 10),
+              },
+            },
+          })
+        ),
+        related: relatedFields
+      },
     };
   }
 
@@ -1020,8 +1145,8 @@ function launch(file, port) {
       query: object.value.query,
       descrition: object.value.description,
       count: profiles.count,
-      _embedded: {
-        profiles: profiles._embedded.profile,
+      _links: {
+        profiles: profiles._links.profile,
       }
     };
   }
@@ -1037,38 +1162,44 @@ function launch(file, port) {
     ];
 
     const matches = fields.reduce((r, field) => {
-
       const exact = indices[field][q] || [];
-      r.exact.push(Object.assign({
-        field,
-        count: exact.length,
-      }, field !== 'name' ? {
-        href: `/${field}/${encodeURIComponent(q)}`,
-      } : {
-        href: `/profiles?name=${encodeURIComponent(q)}`,
-        profiles: exact.map(({ name: title, id }) => ({
-          title,
-          href: `/profiles/${id}`,
-        })),
-      }));
+      r.exact.push(Object.assign(
+        {
+          field,
+          count: exact.length,
+        },
+        field !== 'name' ? {
+          href: `/${field}/${encodeURIComponent(q)}`,
+        } : {
+          href: `/profiles?name=${encodeURIComponent(q)}`,
+          profiles: exact.map(({ name: title, id }) => ({
+            title,
+            href: `/profiles/${id}`,
+          })),
+        }
+      ));
 
       const partial = maps[field].filter(e => e.name !== q && e.name.includes(q));
-      r.partial.push(Object.assign({
-        field,
-        count: partial.length,
-      }, {
-        href: field !== 'name' ?
-          `/${field}?q=${encodeURIComponent(q)}` :
-          `/profiles?name=${encodeURIComponent(q)}`,
-      }, {
-        items: sortByCountDesc(partial.map(({ name, count }) => ({
-          title: name,
+      r.partial.push(Object.assign(
+        {
+          field,
+          count: partial.length,
+        },
+        {
           href: field !== 'name' ?
-            `/${field}/${encodeURIComponent(name)}` :
-            `/profiles?name=${encodeURIComponent(name)}`,
-          count,
-        }))).slice(0, 3),
-      }));
+            `/${field}?q=${encodeURIComponent(q)}` :
+            `/profiles?name=${encodeURIComponent(q)}`,
+        },
+        {
+          items: sortByCountDesc(partial.map(({ name, count }) => ({
+            title: name,
+            count,
+            href: field !== 'name' ?
+              `/${field}/${encodeURIComponent(name)}` :
+              `/profiles?name=${encodeURIComponent(name)}`,
+          }))).slice(0, 3),
+        }
+      ));
       return r;
     }, { exact: [], partial: [] });
 
@@ -1121,6 +1252,14 @@ function launch(file, port) {
     return { [field]: get(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
   }
 
+  // App setup
+
+  const express = require('express');
+  const bodyParser = require('body-parser');
+  const morgan = require('morgan');
+
+  const app = express();
+
   app.use(morgan('[:date[iso]] :method :url :status :response-time ms - :res[content-length]'));
   app.use(bodyParser.json());
   app.use(bodyParser.urlencoded({ extended: false }));
@@ -1151,32 +1290,54 @@ routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>
         });
       });
 
+      routes.push('');
+
       get('/livereload', () => {});
+
+      routes.push('');
+
       get('/profiles', callWithReqQuery(getProfiles));
       get('/profiles/:id', callWithReqParams(getProfile));
 
-      get('/name', callWithReqQuery(getMapCollection('name')));
-      get('/name/:name', callWithReqParams(getMapCollectionItem('name')));
+      routes.push('');
 
-      get('/positions.companyName', callWithReqQuery(getMapCollection('positions.companyName')));
-      get('/positions.companyName/:name', callWithReqParams(getMapCollectionItem('positions.companyName')));
-      get('/positions.companyName/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('positions.companyName')));
+      get('/name', callWithReqQuery(curry(getMapCollection)('name')));
+      get('/name/:name', callWithReqParams(curry(getMapCollectionItem)('name')));
 
-      get('/positions.title', callWithReqQuery(getMapCollection('positions.title')));
-      get('/positions.title/:name', callWithReqParams(getMapCollectionItem('positions.title')));
-      get('/positions.title/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('positions.title')));
+      routes.push('');
 
-      get('/skills.name', callWithReqQuery(getMapCollection('skills.name')));
-      get('/skills.name/:name', callWithReqParams(getMapCollectionItem('skills.name')));
-      get('/skills.name/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('skills.name')));
+      get('/skills.name', callWithReqQuery(curry(getMapCollection)('skills.name')));
+      get('/skills.name/:name', callWithReqParams(curry(getMapCollectionItem)('skills.name')));
+      get('/skills.name/:name/related/:related', callWithReqParams(curry(getMapCollectionItemRelated)('skills.name')));
       get('/skills.name/:name/top', callWithReqParams(getSkillTopSkills));
 
-      get('/topSkills', callWithReqQuery(getTopSkills));
-      get('/topSkillsN2', callWithReqQuery(getTopSkillsN2));
+      routes.push('');
+
+      get('/positions.companyName', callWithReqQuery(curry(getMapCollection)('positions.companyName')));
+      get('/positions.companyName/:name', callWithReqParams(curry(getMapCollectionItem)('positions.companyName')));
+      get('/positions.companyName/:name/related/:related', callWithReqParams(curry(getMapCollectionItemRelated)('positions.companyName')));
+
+      routes.push('');
+
+      get('/positions.title', callWithReqQuery(curry(getMapCollection)('positions.title')));
+      get('/positions.title/:name', callWithReqParams(curry(getMapCollectionItem)('positions.title')));
+      get('/positions.title/:name/related/:related', callWithReqParams(curry(getMapCollectionItemRelated)('positions.title')));
+
+      routes.push('');
+
+      get('/relations', callWithReqQuery(curry(getMapCollection)('relations')));
+
+      routes.push('');
 
       get('/suggest/:q', callWithReqParams(getSuggest));
+
+      routes.push('');
+
       get('/savedSearches', callWithReqQuery(getSearches));
       get('/savedSearches/:name', callWithReqParams(getSearch));
+
+      routes.push('');
+
       app.post('/save', callWithReqBody(saveSomething));
 
       app.get('/inspect/:variable/:field', callWithReqParams(inspect));
@@ -1184,11 +1345,7 @@ routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>
     }
   );
 
-  app.use((err, req, res, next) => res.status(err.code || 500).send(`
-${err.message}<hr/>
-<code>${(err.stack || '').replace(/\n/g, '<br/>')}</code><hr/>
-<code>${JSON.stringify(err.data)}</code>
-`));
+  app.use(errorHandler);
 
   app.listen(port, () => {
     startTimer.check();
@@ -1203,12 +1360,16 @@ let port = 3000;
 readdir('profiles', (err, profiles) => {
   const apps = profiles
           .filter(file => file.match('json'))
-//          .filter(file => file.match('huitre'))
-          .filter(file => file.match('aka'))
+          .filter(file => file.match('huitre'))
+//          .filter(file => file.match('aka'))
 //          .filter(file => file.match('bob'))
 //          .filter(file => file.match('klad'))
           .map(profile => {
             launch(profile, port);
             port += 1;
           });
+
+  if (!apps.length) {
+    console.warn('no apps started');
+  }
 });
