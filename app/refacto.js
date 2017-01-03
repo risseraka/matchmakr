@@ -362,6 +362,7 @@ function parseQuery(q) {
 }
 
 const sortByCountDesc = sortBy('count', true);
+const sortByEndorsementCountDesc = sortBy('endorsementCount', true);
 const filterByCountPositive = filterBy('count', e => e > 0);
 const filterByCountOne = filterBy('count', e => e > 1);
 
@@ -416,7 +417,7 @@ function launch(file, port) {
     return a > b ? 1 : (a < b ? -1 : 0);
   });
   profiles.forEach(p => {
-    p.skills.sort((a, b) => (b.endorsementCount || 0) - (a.endorsementCount || 0));
+    sortByEndorsementCountDesc(p.skills);
     p.positions.sort((a, b) => {
       return b.startDate !== a.startDate ? b.startDate - a.startDate : (a.endDate || b.endDate);
     });
@@ -622,7 +623,7 @@ function launch(file, port) {
       ...ids
         .filter(e => indices.profiles[e])
         .map(e => indices.profiles[e])
-        .sort((a, e) => compareStrings(e.name, a.name))
+        .sort((a, b) => compareStrings(b.name, a.name))
         .map(func || format.profile),
       ...ids.filter(e => !indices.profiles[e]).sort(compareInts)
     ];
@@ -634,8 +635,7 @@ function launch(file, port) {
   }
 
   function getProfiles(query) {
-    let results = profiles;
-    results.forEach(p => delete p.matches);
+    let results = JSON.parse(JSON.stringify(profiles));
 
     if (query.q) {
       query = mergeQueries(query, parseQuery(query.q));
@@ -741,12 +741,48 @@ function launch(file, port) {
       )
     }, result, {
       skills: skills.map(s => {
+        const name = normalize(s.name);
+
+        const items = indices['skills.name'][name];
+
+        if (s.endorsementCount && items.length > 1) {
+          const endorsements = items
+                  .map(p => toNumber(p.skills.find(s => normalize(s.name) === name).endorsementCount))
+                  .sort((a, b) => compareInts(b, a));
+          const index = endorsements.indexOf(s.endorsementCount);
+          const p = index / endorsements.length;
+          s.percentile = Math.ceil(p * (p < 0.05 ? 20 : 10)) * (p < 0.05 ? 5 : 10) || 1;
+        } else {
+          s.percentile = 'N/A';
+        }
+
+        const endorsers = s.endorsers;
+        delete s.endorsers;
+        s.endorsers = endorsers;
+
+        if (s.endorsers && s.endorsers.length) {
+          const sendorsers = index(items, 'id', true, e => true);
+
+          s.endorsers = formatProfileIds(s.endorsers, p => {
+            const formatted = format.profile(p);
+            if (sendorsers[p.id]) {
+              formatted.super = true;
+            }
+            return formatted;
+          });
+        } else {
+          s.endorsers = [];
+        }
+
         s._links = {
-          'skills.name': { href: `/skills.name/${encodeURIComponent(normalize(s.name))}` },
+          'skills.name': { href: `/skills.name/${encodeURIComponent(name)}` },
         };
-        if (s.endorsers && s.endorsers.length) s.endorsers = formatProfileIds(s.endorsers);
-        else delete s.endorsers;
+
         return s;
+      }).sort((a, b) => {
+        if (a.percentile === 'N/A') return 1;
+        if (a.percentile !== b.percentile) return a.percentile - b.percentile;
+        return (b.endorsementCount || 0) - (a.endorsementCount || 0);
       }),
       positions: positions.map(s => {
         if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
@@ -777,112 +813,6 @@ function launch(file, port) {
     });
 
     return result;
-  }
-
-  function getProfileMap({ id }) {
-    const profile = indices.profiles[id];
-    if (!profile) return res.status(404).send();
-
-    const { name } = profile;
-
-    const { friends, endorsees, endorsers, connecteds, network } = networks.index[id];
-
-    const ndir = intersection(
-      connecteds,
-      flatMap(connecteds, p => indices.networks[p].connecteds)
-    ).concat(connecteds).sort();
-
-    const inter = sortByCountDesc(mapField(ndir, null));
-
-    return {
-      id,
-      name,
-      endorsers: formatProfileIds(endorsers, formatProfile),
-      endorsees: formatProfileIds(endorsees, formatProfile),
-      connecteds: formatProfileIds(connecteds, formatProfile),
-      friends: formatProfileIds(friends, formatProfile),
-      network: formatProfileIds(network, formatProfile),
-      ndir: formatProfileIds(ndir, formatProfile),
-      inter,
-    };
-  }
-
-  function getProfilesMap({ sort, size = 10 }) {
-    let results = networks.slice();
-    if (sort) {
-      const reverse = sort.match(/^-/);
-      const field = reverse ? sort.slice(1) : sort;
-      results.sort((a, b) => closure(
-        get(a, field),
-        get(b, field),
-        (a, b) =>
-          (reverse ? -1 : 1) *
-          (Number.isInteger(a - b) ?
-           compareInts(b, a) :
-           compareStrings(b, a))
-      ));
-    }
-    return results.slice(0, size);
-  }
-
-  function getMapCollection(collection) {
-    return ({ q }) => {
-      let results = maps[collection];
-
-      if (q) {
-        q = normalize(q);
-        results = results.filter(t => t.name.includes(q));
-      }
-
-      const total = maps[collection].length;
-      const count = results.length;
-
-      return Object.assign({
-        total,
-      }, count !== total ? {
-        count,
-        percentage: percentage(count / total),
-      } : {}, {
-        _embedded: {
-          [collection]: sortByCountDesc(results).map(format[collection](count)),
-        },
-      });
-    };
-  }
-
-  function getMapCollectionItem(collection) {
-    return ({ name }) => {
-      name = normalize(name);
-
-      const profiles = indices[collection][name];
-      if (!profiles) throw httpError(404, `No such ${collection}`);
-
-      const count = profiles.length;
-      if (!count) return 'No results';
-
-      const current = `${collection}=${name}&`;
-
-      const items = {
-        'skills.name': collection === 'skills.name' ?
-          getSkillRelatedSkillsMap({ name }) : mapField(profiles, 'skills.name', unique),
-        'positions.companyName': mapField(profiles, 'positions.companyName', unique),
-        'positions.title': mapField(profiles, 'positions.title', unique),
-      };
-
-      return {
-        name,
-        _links: {
-          profile: {
-            href: `/profiles?${collection}=${encodeURIComponent(name)}`,
-            count,
-          },
-        },
-        _embedded: reduceObject(items, (r, items, collection) => {
-          r[collection] = sortByCountDesc(items).map(format[collection](count, current));
-          return r;
-        }, {}),
-      };
-    };
   }
 
   function getSkillRelatedSkillsMap({ name }) {
@@ -964,6 +894,95 @@ function launch(file, port) {
     }, []);
 
     return topSkills;
+  }
+
+  function getMapCollection(collection) {
+    return ({ q }) => {
+      let results = maps[collection];
+
+      if (q) {
+        q = normalize(q);
+        results = results.filter(t => t.name.includes(q));
+      }
+
+      const total = maps[collection].length;
+      const count = results.length;
+
+      return Object.assign({
+        total,
+      }, count !== total ? {
+        count,
+        percentage: percentage(count / total),
+      } : {}, {
+        _embedded: {
+          [collection]: sortByCountDesc(results).map(format[collection](count)),
+        },
+      });
+    };
+  }
+
+  function getMapCollectionItemRelated(collection) {
+    return ({ name, related }) => {
+      name = normalize(name);
+
+      const profiles = indices[collection][name];
+      if (!profiles) throw httpError(404, `No such ${collection}`);
+
+      const count = profiles.length;
+      if (!count) return 'No results';
+
+      const current = `${collection}=${encodeURIComponent(name)}&`;
+
+      const items = related === 'skills.name' ?
+              getSkillRelatedSkillsMap({ name }) :
+            mapField(profiles, related, unique);
+
+      return {
+        field: related,
+        count: items.length,
+        _links: {
+          self: { href: `/${collection}/${name}/related/${related}` },
+          [related]: sortByCountDesc(items).map(format[related](count, current)),
+        },
+      };
+    };
+  }
+
+  function getMapCollectionItem(collection) {
+    const getRelated = getMapCollectionItemRelated(collection);
+
+    return ({ name }) => {
+      name = normalize(name);
+
+      const profiles = indices[collection][name];
+      if (!profiles) throw httpError(404, `No such ${collection}`);
+
+      const count = profiles.length;
+      if (!count) return 'No results';
+
+      const current = `${collection}=${encodeURIComponent(name)}&`;
+
+      const fields = [
+        'skills.name',
+        'positions.companyName',
+        'positions.title',
+      ];
+
+      return {
+        name,
+        _links: {
+          profile: {
+            href: `/profiles?${current}`,
+            count,
+          },
+        },
+        _embedded: fields.reduce((r, field) => {
+          r[field] = getRelated({ name, related: field });
+          r[field]._links[field] = r[field]._links[field].slice(0, 10);
+          return r;
+        }, {}),
+      };
+    };
   }
 
   function getSearches() {
@@ -1135,22 +1154,25 @@ routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>
       get('/livereload', () => {});
       get('/profiles', callWithReqQuery(getProfiles));
       get('/profiles/:id', callWithReqParams(getProfile));
-      get('/profiles/:id/map', callWithReqParams(getProfileMap));
-      get('/profilesMap', callWithReqQuery(getProfilesMap));
+
+      get('/name', callWithReqQuery(getMapCollection('name')));
+      get('/name/:name', callWithReqParams(getMapCollectionItem('name')));
+
+      get('/positions.companyName', callWithReqQuery(getMapCollection('positions.companyName')));
+      get('/positions.companyName/:name', callWithReqParams(getMapCollectionItem('positions.companyName')));
+      get('/positions.companyName/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('positions.companyName')));
+
+      get('/positions.title', callWithReqQuery(getMapCollection('positions.title')));
+      get('/positions.title/:name', callWithReqParams(getMapCollectionItem('positions.title')));
+      get('/positions.title/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('positions.title')));
 
       get('/skills.name', callWithReqQuery(getMapCollection('skills.name')));
-      get('/positions.companyName', callWithReqQuery(getMapCollection('positions.companyName')));
-      get('/positions.title', callWithReqQuery(getMapCollection('positions.title')));
-
       get('/skills.name/:name', callWithReqParams(getMapCollectionItem('skills.name')));
-      get('/skills.name/:name/related', callWithReqParams(getSkillRelatedSkills));
+      get('/skills.name/:name/related/:related', callWithReqParams(getMapCollectionItemRelated('skills.name')));
       get('/skills.name/:name/top', callWithReqParams(getSkillTopSkills));
 
       get('/topSkills', callWithReqQuery(getTopSkills));
       get('/topSkillsN2', callWithReqQuery(getTopSkillsN2));
-
-      get('/positions.companyName/:name', callWithReqParams(getMapCollectionItem('positions.companyName')));
-      get('/positions.title/:name', callWithReqParams(getMapCollectionItem('positions.title')));
 
       get('/suggest/:q', callWithReqParams(getSuggest));
       get('/savedSearches', callWithReqQuery(getSearches));
@@ -1181,9 +1203,10 @@ let port = 3000;
 readdir('profiles', (err, profiles) => {
   const apps = profiles
           .filter(file => file.match('json'))
-//          .slice(0, 1)
-//          .slice(1, 2)
-          .slice(-1)
+//          .filter(file => file.match('huitre'))
+          .filter(file => file.match('aka'))
+//          .filter(file => file.match('bob'))
+//          .filter(file => file.match('klad'))
           .map(profile => {
             launch(profile, port);
             port += 1;
