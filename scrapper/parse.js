@@ -45,10 +45,11 @@ const parse = {
   info(data) {
     const info = data.BasicInfo.basic_info;
 
-    const { fullname: name } = info;
+    const { fullname: name, location_highlight: location } = info;
     return {
       id: info.memberID,
       name,
+      location,
     };
   },
   skills(data) {

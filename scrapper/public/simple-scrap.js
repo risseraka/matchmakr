@@ -14,6 +14,8 @@ function Scrap({ urls, target, json, wait }) {
     const url = state.urls.shift();
     if (!url) return Promise.resolve();
 
+    write(`fetching ${url}`);
+
     return state.get(url)
       .then(result => $.post(
         target
@@ -78,7 +80,7 @@ function scrapProfiles({ memberId, profiles }) {
 
 function scrapConnections({ memberId }) {
   let start = 0;
-  const count = 100;
+  const count = 10;
 
   let connections = [];
 
