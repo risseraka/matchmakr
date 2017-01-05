@@ -3,538 +3,116 @@
 const { readdir, readFileSync: read, writeFileSync: write } = require('fs');
 const qs = require('querystring');
 
-// Utils
+const {
+  toNumber,
+  opposite,
+  decimal,
+  percentage,
+  percentile,
+} = require('./lib/utils/math');
+
+const {
+  get,
+  forEachObject,
+  reduceObject,
+  mapObject,
+  pluck,
+  arrayify,
+  pushIn,
+} = require('./lib/utils/object');
+
+const {
+  unique,
+  intersection,
+  intersects,
+  union,
+  flatten,
+  flatMap,
+  sortWith,
+  sortBy,
+  filterWith,
+  mapWith,
+  filterBy,
+  compareInts,
+  compareStrings,
+  compareDates,
+} = require('./lib/utils/array');
+
+const {
+  normalize,
+  parseRange,
+} = require('./lib/utils/string');
+
+const {
+  YEAR,
+  diffDateFromNow,
+  diffDates,
+  toYear,
+} = require('./lib/utils/date');
+
+const {
+  negate,
+  closure,
+  mapArgs,
+  curry,
+  compose,
+  composeArrayArgs,
+} = require('./lib/utils/function');
+
+const {
+  getDeepRec,
+  getDeep,
+} = require('./lib/utils/getDeep');
+
+const {
+  indexObject,
+  index,
+  mapField,
+} = require('./lib/utils/mapIndex');
+
+const timer = require('./lib/utils/timer');
+const { Search } = require('./lib/utils/search');
+
+const { errorHandler, httpError } = require('./lib/middlewares/error-handler');
+const { liveReload } = require('./lib/middlewares/live-reload');
+const { cache } = require('./lib/middlewares/cache');
+const {
+  callWithReqQuery,
+  callWithReqParams,
+  callWithReqBody,
+} = require('./lib/middlewares/call-with-req');
+
+const {
+  mergeQueries,
+  parseQuery,
+} = require('./lib/utils/query');
+
+const {
+  isInRange,
+  isIncludedIn,
+  isEqual,
+} = require('./lib/utils/is');
+
+const compareIntsDesc = compose(compareInts, opposite);
+const compareStringsDesc = compose(compareStrings, opposite);
+const compareNames = composeArrayArgs(mapArgs(e => e.name), compareStrings);
+const compareNormalized = composeArrayArgs(mapArgs(normalize), compareStrings);
+const compareStartEndDates = composeArrayArgs(mapArgs(({ startDate, endDate }) => [startDate, endDate]), compareDates);
+
+const sortByName = sortBy('name', compareStrings);
+const sortByNormalizedName = sortBy('name', compareNormalized);
+const sortByCountDesc = sortBy('count', compareInts, true);
+const sortByEndorsementCountDesc = sortBy('endorsementCount', compareInts, true);
+const sortBySeniorityDesc = sortBy('seniority', compareInts, true);
 
-function memoize(func) {
-  return func;
-  const memo = {};
-  return (...args) => {
-    if (memo[args]) return memo[args];
-    return memo[args] = func.apply(this, args);
-  };
-}
-
-// Math
-
-function toNumber(value) {
-  return Number.isNaN(+value) ? -1 : +value;
-}
-
-function opposite(a) {
-  return a * -1;
-}
-
-function decimal(n, digit) {
-  const pow = Math.pow(10, digit);
-  return Math.floor(n * pow) / pow;
-}
-
-function percentage(n, precision = 2) {
-  return decimal(n * Math.pow(10, precision), precision);
-}
-
-function percentile(arr, value, precision = 10, min = 0.05, minPrecision = 5) {
-  if (!arr || !value) return 'N/A';
-
-  const index = arr.indexOf(value);
-  const p = index / arr.length;
-
-  return Math.ceil(p * 100 / (p < min ? minPrecision : precision)) * (p < min ? minPrecision : precision) || 1;
-}
-
-// Strings
-
-// http://stackoverflow.com/questions/990904/remove-accents-diacritics-in-a-string-in-javascript
-function normalizeW(str) {
-  return typeof str === 'string' && str
-    .normalize('NFD')
-    .replace(/[-.,!\/\]\[\(\)]/g, '')
-    .replace(/ +/g, ' ')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-}
-const normalize = memoize(normalizeW);
-
-// Objects
-
-function forEachObject(obj, func) {
-  if (!obj) return obj;
-
-  return Object.keys(obj).forEach(key => func(obj[key], key));
-}
-
-function reduceObject(obj, func, acc) {
-  if (!obj) return acc;
-
-  return Object.keys(obj).reduce((r, key, i, keys) => {
-    return func(r, obj[key], key, keys);
-  }, acc);
-}
-
-function mapObject(obj, func) {
-  if (!obj) return [];
-
-  return Object.keys(obj).map(key => func(obj[key], key));
-}
-
-function pluck(obj, ...fields) {
-  if (!obj) return {};
-
-  return fields.reduce((r, f) => (obj[f] && (r[f] = obj[f]), r), {});
-}
-
-function arrayify(obj) {
-  if (Array.isArray(obj)) return obj;
-
-  return [obj];
-}
-
-function get(obj, fields, flat) {
-  if (!obj || !fields) return obj;
-
-  if (typeof fields === 'string') fields = fields.split('.');
-
-  for (let i = 0, j = fields.length; i < j; i += 1) {
-    if (!obj) return null;
-    if (Array.isArray(obj) && !(fields[i] in obj)) {
-      return flat ?
-        flatMap(obj, (o => get(o, fields.slice(i)))) :
-        obj.map(o => get(o, fields.slice(i)));
-    }
-    try {
-      obj = obj[fields[i]];
-    } catch(e) {
-      console.log(obj, fields);
-      throw e;
-    }
-  }
-
-  return obj;
-}
-
-function stringifyToHTML(obj) {
-  if (typeof obj !== 'object') {
-    return obj !== undefined && obj !== null ? obj.toString() : '';
-  }
-
-  const mapped = mapObject(
-    obj,
-    (v, k) => {
-      const length = Array.isArray(v) ? ` (${v.length})`: '';
-      const value = k === 'href' ? `<a href="${v}">${v}</a>` : stringifyToHTML(v);
-      return `<li>${k}${length}: ${value}</li>`;
-    }
-  );
-  return `<ul>${mapped.join('')}</ul>`;
-}
-
-function pushIn(obj, field, values, unique = false, merge = false) {
-  if (unique) {
-    obj[field] = values;
-    return;
-  }
-
-  if (merge) {
-    if (!obj[field]) {
-      obj[field] = values;
-    } else {
-      if (Array.isArray(values)) {
-        Array.prototype.push.apply(obj[field], values);
-      } else if (typeof values === 'object') {
-        obj[field] = Object.assign(obj[field], values);
-      } else {
-        obj[field].push(values);
-      }
-    }
-  } else {
-    if (!obj[field]) {
-      obj[field] = [];
-    }
-    obj[field].push(values);
-  }
-}
-
-// Arrays
-
-function uniqueW(arr) {
-  if (!arr || !arr.length) return [];
-  return [...new Set(arr)];
-}
-
-const unique = memoize(uniqueW);
-
-function intersection(arr1, arr2) {
-  if (!arr1.length || !arr2.length) return [];
-  return arr1.filter(e => arr2.includes(e));
-}
-
-function intersects(arr1, arr2) {
-  if (!arr1.length || !arr2.length) return false;
-  return arr1.some(e => arr2.includes(e));
-}
-
-function flatMap(arr, func) {
-  return [].concat(...arr.map(func));
-}
-
-function sortBy(field, reverse) {
-  return arr => arr.sort((a, b) => (toNumber(a[field]) - toNumber(b[field])) * (reverse ? -1 : 1));
-}
-
-function filterBy(field, func) {
-  return arr => arr.filter(e => func(e[field]));
-}
-
-function union(...args) {
-  if (!args.length) return [];
-  return [].concat(...args);
-}
-
-// Comparison
-
-function compareStrings(a, b) {
-  return a === b ? 0 : (a < b ? 1 : -1);
-}
-
-function compareInts(a, b) {
-  return (a || 0) - (b || 0);
-}
-
-// Functions
-
-function closure(...args) {
-  const func = args.pop();
-  return func(...args);
-}
-
-function curry(func) {
-  return (...first) => {
-    return (...then) => func(...first, ...then);
-  };
-}
-
-function compose(func, ...funcs) {
-  return (...args) => {
-    const result = func(...args);
-    return funcs.reduce((r, func) => func(r), result);
-  };
-}
-
-function stringify(obj, exclude = []) {
-  if (typeof obj !== 'object') return obj ? obj.toString() : '';
-  return mapObject(obj, (v, k) => !exclude.includes(k) ? stringify(v): '');
-}
-
-// Object and arrays mapping/indices/aggregations
-
-function indexObject(obj, format = (k, v) => k) {
-  return reduceObject(obj, (r, value, key) => arrayify(value).reduce((r, value) => {
-    pushIn(r, value, format(key, value));
-    return r;
-  }, r), {});
-}
-
-function index(arr, field, unique, format = e => e) {
-  if (!arr || !arr.length) return {};
-
-  const formatItem = typeof format === 'function' ? format : e => get(e, format);
-
-  return arr.reduce((r, e) => {
-    const key = !field ?
-            e :
-            (typeof field === 'function' ? field(e) : get(e, field));
-
-    return [...[].concat(key)].reduce((r, key) => {
-      if (typeof key === 'string') key = normalize(key);
-      pushIn(r, key, formatItem(e), unique);
-      return r;
-    }, r);
-  }, {});
-}
-
-function mapFieldObject(obj, formatItems = e => e) {
-  const itemsFormatter = typeof formatItems === 'function' ?
-          formatItems :
-          (!formatItems ? e => e : items => get(items, formatItems));
-
-  return mapObject(obj, (items, name) => {
-    const formatted = itemsFormatter(items, name);
-
-    return {
-      name,
-      count: formatted.length,
-      items: formatted,
-    };
-  });
-}
-
-function mapField(profiles, field, formatItems = e => e, formatItem) {
-  if (!profiles || !profiles.length) return [];
-
-  const fieldIndex = index(profiles, field, false, formatItem);
-
-  const map = mapFieldObject(fieldIndex, (items, name) => {
-    const formatted = formatItems(items, name);
-
-    // Overwrite index items by formatted ones
-    fieldIndex[name] = formatted;
-
-    return formatted;
-  });
-  map.index = fieldIndex;
-  return map;
-}
-
-// Timer module
-
-function timer(inLabel) {
-  inLabel = `${inLabel || 'time'}`;
-
-  let label;
-
-  const timer = {
-    buildLabel(newLabel) {
-      return label = newLabel && `${inLabel}:${newLabel}` || inLabel;
-    },
-    start(newLabel) {
-      label = timer.buildLabel(newLabel);
-
-      console.time(label);
-
-      return timer;
-    },
-    check(newLabel) {
-      console.timeEnd(label);
-
-      label = timer.buildLabel(newLabel);
-
-      console.time(label);
-
-      return timer;
-    },
-  };
-  return timer;
-}
-
-// Middlewares
-
-// Error handler middleware
-
-function httpError(code, message) {
-  const e = new Error(message);
-  e.code = code;
-  throw e;
-}
-
-function errorHandler(err, req, res, next) {
-  res.status(err.code || 500).format({
-    html: () => res.send(`
-${err.message}<hr/>
-<code>${(err.stack || '').replace(/\n/g, '<br/>')}</code><hr/>
-<code>${JSON.stringify(err.data)}</code>
-`),
-    default: () => res.send(err),
-  });
-}
-
-// Live reload middleware
-
-function liveReload() {
-  const scriptTag = `<script type="text/javascript">
-function checkReload(etag) {
-  fetch(new Request('/livereload')).catch(() => window.location.reload());
-}
-checkReload();
-</script>`;
-
-  return (req, res, next) => {
-    const send = res.send.bind(res);
-    //  res.send = str => send(liveReload + (str || ''));
-    next();
-  };
-}
-
-// Cache middleware
-
-function cache() {
-  const memo = {};
-  return (req, res, next) => {
-    if (req.method !== 'GET') return next();
-
-    const send = res.send.bind(res);
-
-    if (!('nocache' in req.query) && memo[req.url]) {
-      return send(memo[req.url]);
-    }
-
-    res.send = result => {
-      if (!memo[req.url]) memo[req.url] = result;
-
-      send(result);
-    };
-
-    next();
-  };
-}
-
-function callWithReq(field, func) {
-  return (req, res) => {
-    const result = func(req[field]);
-
-    res.format({
-      html: () => res.send(stringifyToHTML(result)),
-      default: () => res.send(result),
-    });
-  };
-}
-
-function callWithReqParams(func) {
-  return callWithReq('params', func);
-}
-
-function callWithReqQuery(func) {
-  return callWithReq('query', func);
-}
-
-function callWithReqBody(func) {
-  return callWithReq('body', func);
-}
-
-// Search
-
-function Search(haystack, exclude = []) {
-  const stringed = haystack.map(p => normalize(stringify(p, exclude).join(' ')));
-
-  const search = needle => {
-    needle = arrayify(needle).map(normalize);
-    return stringed.filter(e => needle.every(n => e.includes(n))).map(e => e.split(' ')[0]);
-  };
-  search.stringed = stringed;
-  return search;
-}
-
-// Query
-
-function parseRange(str) {
-  const range = str.split('..');
-
-  if (range.length === 1) return [range[0], range[0]];
-
-  return [range[0] || -Infinity, range[1] || +Infinity];
-}
-
-function mergeQueries(target, query) {
-  return reduceObject(query, (r, value, field) => {
-    if (field == '') {
-      r.q = value;
-    } else {
-      r[field] = (value || []).concat(r[field] || []);
-    }
-    return r;
-  }, target);
-}
-
-function parseQuery(q) {
-  return flatMap(arrayify(q), e => e.trim().split(' '))
-    .reduce((r, e) => {
-      e = e.split(':');
-
-      const value = (e[1] || e[0]).split(',');
-      const field = !e[1] ? '' : e[0];
-
-      pushIn(r, field, value, false, true);
-
-      return r;
-    }, { '': [] });
-}
-
-const sortByCountDesc = sortBy('count', true);
-const sortByNameDesc = sortBy('name', true);
-const sortByEndorsementCountDesc = sortBy('endorsementCount', true);
-const filterByCountPositive = filterBy('count', e => e > 0);
 const filterByCountOne = filterBy('count', e => e > 1);
+const filterExisting = filterWith(e => e);
 
-const filterAndSortByCountOne = arr => filterByCountOne(sortByCountDesc(arr));
+const filterAndSortByCountOne = compose(sortByCountDesc, filterByCountOne);
 
-function filterProfiles(profiles, field, value, greedy = true) {
-  const values = arrayify(value).map(normalize);
+const mapNormalize = mapWith(normalize);
 
-  return profiles.filter(p => {
-    const pValues = get(p, field);
-
-    // match all values
-    if (greedy) {
-      const matches = values.filter(v => pValues.some(s => normalize(s) === v));
-      return matches.length === values.length;
-    }
-
-    // match at least one value
-    return values.some(v => pValues.some(s => normalize(s) === v));
-  });
-}
-
-function formatLine(field) {
-  return (c, current = '') => s => {
-    const name = encodeURIComponent(s.name);
-    return {
-      href: `/${field}/${name}`,
-      title: s.name,
-      _links: {
-        profile: {
-          count: s.count,
-          percentage: c ? percentage(s.count / c) : 'N/A',
-          href: `/profiles?${current}${field}=${name}`,
-        },
-      },
-    };
-  };
-}
-
-function formatRelations({ id, count, friends, endorsers, endorsees, network }) {
-  return {
-    id,
-    count,
-    endorsers: endorsers.length,
-    endorsees: endorsees.length,
-    network: network.length,
-    friends: friends.length,
-  };
-}
-
-function formatProfilesMatches(matches) {
-  return matches ? {
-    matches: reduceObject(matches, (r, match, key) => {
-      if (typeof match !== 'object') {
-        r[key] = match;
-      } else {
-        r[key] = match.map(v => Object.assign(
-          pluck(v, 'name', 'endorsementCount', 'percentile', 'superEndorsementCount'),
-          v ? { _links: { href: `/${key}/${encodeURIComponent(normalize(v.name))}` } } : {}
-        ));
-      }
-      return r;
-    }, {}),
-  } : {};
-}
-
-const format = {
-  profile: ({ id, name: title, score, matches }) => Object.assign(
-    {
-      title,
-      score,
-      href: `/profiles/${id}`,
-    },
-    formatProfilesMatches(matches)
-  ),
-  name: formatLine('name'),
-  seniority: formatLine('seniority'),
-  location: formatLine('location'),
-  'skills.name': formatLine('skills.name'),
-  'positions.companyName': formatLine('positions.companyName'),
-  'positions.title': formatLine('positions.title'),
-  relations: () => formatRelations,
-};
-
+const log = console.log;
 
 function calcSeniority(positions) {
   const xp1 = positions.reduce(
@@ -543,36 +121,37 @@ function calcSeniority(positions) {
   );
 
   return xp1 && xp1.startDate ?
-    new Date().getFullYear() - new Date(xp1.startDate).getFullYear() :
+    diffDateFromNow(xp1.startDate) :
     'N/A';
 }
 
 function prepareData(file) {
   const time = timer().start('profiles');
 
-  const profiles = require(`./profiles/${file}`).sort((a, b) => {
-    a = normalize(a.name);
-    b = normalize(b.name);
-    return a > b ? 1 : (a < b ? -1 : 0);
-  });
+  const data = require(`./profiles/${file}`);
+
+  const profiles = sortByNormalizedName(data);
+
+  mapField(profiles, 'skills.name', unique);
+
   profiles.forEach(profile => {
     sortByEndorsementCountDesc(profile.skills);
 
-    profile.positions.sort((a, b) => {
-      return b.startDate !== a.startDate ? b.startDate - a.startDate : (a.endDate || b.endDate);
-    });
+    profile.positions.sort(compareStartEndDates);
 
     profile.seniority = calcSeniority(profile.positions);
   });
 
   profiles.index = index(profiles, 'id', true);
 
-  time.check('mapping');
+  time.check('search');
 
   const search = Search(profiles, ['profileUrl']);
 
+  time.check('mapping');
+
   const maps = {
-    profiles: profiles,
+    profiles,
     name: mapField(profiles, 'name', unique),
     seniority: mapField(profiles, 'seniority', unique),
     location: mapField(profiles, 'location', unique),
@@ -584,7 +163,7 @@ function prepareData(file) {
   time.check('endorsements');
 
   function buildEndorsements() {
-    const endorsements = profiles.reduce(
+    const endorsements = maps.profiles.reduce(
       (r, p) => p.skills.reduce(
         (r, s) => {
           const name = normalize(s.name);
@@ -605,7 +184,7 @@ function prepareData(file) {
       ), { endorsements: {}, skilled: {}, endorsers: {}, endorsees: {} }
     );
 
-    forEachObject(endorsements.endorsements, endorsements => endorsements.sort(compose(compareInts, opposite)));
+    forEachObject(endorsements.endorsements, endorsements => endorsements.sort(compareIntsDesc));
 
     return endorsements;
   }
@@ -622,14 +201,40 @@ function prepareData(file) {
     endorsements
   );
 
-  time.check('network');
+  time.check('skillsRanks');
+
+  function buildSkillsRanks() {
+    profiles.forEach(profile => {
+      profile.skills.forEach(skill => {
+        const { name, endorsementCount } = skill;
+
+        const normalized = normalize(name);
+
+        const skilled = indices.skilled[normalized];
+        if (!skilled) return;
+
+        const endorsements = indices.endorsements[normalized];
+
+        skill.percentile = percentile(endorsements, endorsementCount);
+
+        const superEndorsementCount = (skill.endorsers || []).reduce((r, e) => r + (skilled[e] ? 1 : 0), 0);
+        if (superEndorsementCount) {
+          skill.superEndorsementCount = superEndorsementCount;
+        }
+      });
+    });
+  }
+
+  buildSkillsRanks();
+
+  time.check('relations');
 
   function buildRelations() {
-    const time = timer('network').start('all');
+    const time = timer('relations').start('all');
 
     const allEndorsees = Object.keys(indices.endorsees);
     const allEndorsers = Object.keys(indices.endorsers);
-    const all = unique(union(allEndorsees, allEndorsers, get(profiles, 'id')).map(id => +id));
+    const all = unique(union(allEndorsees, allEndorsers, getDeep(profiles, 'id')).map(id => +id));
 
     time.check('map');
 
@@ -683,38 +288,33 @@ function prepareData(file) {
   function buildSkillsMatrice() {
     const time = timer('skillsMatrice').start('map');
 
-    const keys = get(filterAndSortByCountOne(maps['skills.name']), 'name');
+    const keys = filterAndSortByCountOne(maps['skills.name']).map(e => e.name);
 
-    const skillsMap = keys.map(name => ({
-      name,
-      items: flatMap(get(indices['skills.name'][name], 'skills.name'), e => e.map(normalize)),
-    }));
+    const skillsMatrice = keys.reduce((r, name) => {
+      const s1 = name;
 
-    time.check('add reduce');
+      const skills = {};
+      const top = { name: '', count: 0 };
+      const rs1 = r[s1] = { skills, top };
 
-    const skillsMatrice = skillsMap.reduce(
-      (r, { name: s1, items }) => {
-        const skills = {};
-        const top = { name: '', count: 0 };
-        const rs1 = r[s1] = { skills, top };
+      const items = flatten((indices['skills.name'][name] || []).map(p => p.skills));
+      return items.reduce((r, { name: s2 }) => {
+        s2 = normalize(s2);
 
-        return items.reduce((r, s2) => {
-          if (s1 === s2) return r;
-          const rs2 = (skills[s2] || 0) + 1;
+        if (s1 === s2) return r;
+        const rs2 = (skills[s2] || 0) + 1;
 
-          skills[s2] = rs2;
+        skills[s2] = rs2;
 
-          if (rs2 > top.count) {
-            top.count = rs2;
-            if (s2 !== top.name) {
-              top.name = s2;
-            }
+        if (rs2 > top.count) {
+          top.count = rs2;
+          if (s2 !== top.name) {
+            top.name = s2;
           }
-          return r;
-        }, r);
-      },
-      {}
-    );
+        }
+        return r;
+      }, r);
+    }, {});
 
     time.check('top map');
 
@@ -746,70 +346,178 @@ function prepareData(file) {
   indices.skillsMatrice = skillsMatrice;
   indices.topSkills = topSkillsIndex;
 
-  time.check('skillsMap');
+  time.check();
 
-  return { profiles, search, maps, indices };
+  return { search, maps, indices };
 }
 
-function launch(file, port) {
-  console.log(`launching '${file}' on port ${port}`);
+function filterProfiles(profiles, field, values, greedy = true, comparison = isEqual, normalizeItem = normalize) {
+  return profiles.filter(profile => {
+    profile.scores = {};
 
-  const startTimer = timer(`${file} started in`).start();
+    const pValues = getDeep(profile, field, true);
+    const isArray = Array.isArray(pValues);
 
-  // Init data
+    const matches = values.map(value => {
+      const match = isArray ?
+              pValues.filter(({ value: pValue }) => comparison(value, normalizeItem(pValue))) :
+            (comparison(value, normalizeItem(pValues.value)) ? [pValues] : []);
 
-  const { profiles, search, maps, indices } = prepareData(file);
+      if (match.length) return match;
 
-  function formatProfileIds(ids, func) {
+      return null;
+    }, []);
+
+    const { length: count } = filterExisting(matches);
+
+    if (count) {
+      if (!profile.matches) {
+        profile.matches = {};
+      }
+      profile.matches[field] = isArray ? getDeep(matches, 'obj') : matches[0][0].value;
+    }
+
+    return greedy ? count : count === values.length;
+  });
+}
+
+function formatLine(field) {
+  return (c, current = '') => s => {
+    const name = encodeURIComponent(s.name);
+    return {
+      href: `/${field}/${name}`,
+      title: s.name,
+      _links: {
+        profile: {
+          count: s.count,
+          percentage: c ? percentage(s.count / c) : 'N/A',
+          href: `/profiles?${current}${field}=${name}`,
+        },
+      },
+    };
+  };
+}
+
+function formatRelations({ id, count, friends, endorsers, endorsees, network }) {
+  return {
+    id,
+    count,
+    endorsers: endorsers.length,
+    endorsees: endorsees.length,
+    network: network.length,
+    friends: friends.length,
+  };
+}
+
+const formatMatch = {
+  name: match => match,
+  location: match => match,
+  seniority: toYear,
+  'skills.name': match => Object.assign(
+    pluck(match, 'name', 'endorsementCount', 'percentile', 'superEndorsementCount'),
+    { _links: { href: `/skills.name/${encodeURIComponent(normalize(match.name))}` } }
+  ),
+  'positions.companyName': match => Object.assign(
+    pluck(match, 'companyName', 'title', 'startDate', 'endDate'),
+    { seniority: toYear(match.seniority) },
+    match.startDate ? { startDate: new Date(match.startDate).toISOString().substr(0, 7) } : {},
+    match.endDate ? { endDate: new Date(match.endDate).toISOString().substr(0, 7) } : {},
+    { _links: { href: `/positions.title/${encodeURIComponent(normalize(match.title))}` } }
+  ),
+  'positions.title': match => Object.assign(
+    pluck(match, 'title', 'companyName', 'startDate', 'endDate'),
+    { seniority: toYear(match.seniority) },
+    match.startDate ? { startDate: new Date(match.startDate).toISOString().substr(0, 7) } : {},
+    match.endDate ? { endDate: new Date(match.endDate).toISOString().substr(0, 7) } : {},
+    { _links: { href: `/positions.title/${encodeURIComponent(normalize(match.title))}` } }
+  ),
+};
+
+function formatProfilesMatches(matches) {
+  if (!matches) return {};
+
+  return {
+    matches: reduceObject(matches, (r, match, field) => {
+      if (typeof match !== 'object') {
+        r[field] = formatMatch[field](match);
+      } else {
+        r[field] = filterExisting(flatten(match)).map(formatMatch[field]);
+      }
+      return r;
+    }, {}),
+  };
+}
+
+function formatProfile(profile) {
+  const { id, name: title, matches } = profile;
+
+  return Object.assign(
+    { title },
+    { href: `/profiles/${id}` },
+    formatProfilesMatches(matches)
+  );
+}
+
+const format = {
+  profiles: formatProfile,
+  name: formatLine('name'),
+  seniority: formatLine('seniority'),
+  location: formatLine('location'),
+  'skills.name': formatLine('skills.name'),
+  'positions.companyName': formatLine('positions.companyName'),
+  'positions.title': formatLine('positions.title'),
+  relations: () => formatRelations,
+};
+
+function formatIds(index, collection, sortField) {
+  const getFromIndex = get.bind(null, index);
+  const sortByField = sortBy(sortField, compareStrings);
+
+  return (ids, func = format[collection]) => {
     if (!ids) return [];
 
     return [
-      ...ids
-        .filter(e => indices.profiles[e])
-        .map(e => indices.profiles[e])
-        .sort((a, b) => compareStrings(b.name, a.name))
-        .map(func || format.profile),
-      ...ids.filter(e => !indices.profiles[e]).sort(compareInts)
+      ...sortByField(ids.reduce((r, e) => {
+        e = getFromIndex(e);
+        if (e) {
+          r.push(func(e));
+        }
+        return r;
+      }, [])),
+      ...ids.filter(compose(getFromIndex, negate)).sort(compareInts)
     ];
-  }
+  };
+}
 
-  function formatProfilePositions(positions) {
-    return positions.map(s => {
-      if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
-      if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
-      s._links = {
-        'positions.companyName': {
-          title: s.companyName,
-          href: `/positions.companyName/${encodeURIComponent(normalize(s.companyName))}`,
-        },
-        'positions.title': {
-          title: s.title,
-          href: `/positions.title/${encodeURIComponent(normalize(s.title))}`,
-        },
-      };
-      return s;
-    });
-  }
+const formatProfileItems = {
+  'positions': indices => positions => positions.map(s => {
+    if (s.startDate) s.startDate = new Date(s.startDate).toISOString().substr(0, 7);
+    if (s.endDate) s.endDate = new Date(s.endDate).toISOString().substr(0, 7);
+    s._links = {
+      'positions.companyName': {
+        title: s.companyName,
+        href: `/positions.companyName/${encodeURIComponent(normalize(s.companyName))}`,
+      },
+      'positions.title': {
+        title: s.title,
+        href: `/positions.title/${encodeURIComponent(normalize(s.title))}`,
+      },
+    };
+    return s;
+  }),
+  skills: indices => {
+    const formatProfileIds = formatIds(indices.profiles, 'profiles', 'name');
 
-  function formatProfileSkills(skills) {
-    return skills.map(skill => {
+    return skills => skills.map(skill => {
       const name = normalize(skill.name);
 
       const items = indices['skills.name'][name];
 
-      skill.percentile = percentile(indices.endorsements[name], skill.endorsementCount);
-
-      delete skill.superEndorsementCount;
-
       const endorsers = formatProfileIds(skill.endorsers, p => {
-        const formatted = format.profile(p);
+        const formatted = format.profiles(p);
 
         if (indices.skilled[name][p.id]) {
           formatted.superEndorser = true;
-          if (!skill.superEndorsementCount) {
-            skill.superEndorsementCount = 0;
-          }
-          skill.superEndorsementCount += 1;
         }
 
         return formatted;
@@ -827,71 +535,47 @@ function launch(file, port) {
       if (a.percentile === 'N/A') return 1;
       if (a.percentile !== b.percentile) return a.percentile - b.percentile;
       return (b.endorsementCount || 0) - (a.endorsementCount || 0);
-    });
-  }
+    })
+  },
+};
 
-  function formatProfilesTemplates(query) {
-    return query.q ?
-      {
-        _templates: {
-          default: {
-            title: 'Save search as',
-            method: 'post',
-            action: '/save',
-            properties: [
-              { name: 'table', type: 'hidden', value: 'search' },
-              { name: 'key', type: 'text' },
-              { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
-            ],
-          },
+function formatProfilesTemplates(query) {
+  return query.q ?
+    {
+      _templates: {
+        default: {
+          title: 'Save search as',
+          method: 'post',
+          action: '/save',
+          properties: [
+            { name: 'table', type: 'hidden', value: 'search' },
+            { name: 'key', type: 'text' },
+            { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
+          ],
         },
-      } : {};
-  }
+      },
+    } : {};
+}
 
-  function computeMatches(results, skillNames) {
-    const skills = skillNames.map(normalize);
+const normalizeQueryField = {
+  savedSearch: value => mapNormalize(flatMap(value, e => e.split(','))),
+  q: e => e,
+  name: mapNormalize,
+  location: mapNormalize,
+  seniority: mapWith(compose(parseRange, (range) => [range[0] * YEAR, range[1] * YEAR])),
+  'skills.name': value => mapNormalize(flatMap(value, e => e.split(','))),
+  'positions.companyName': mapNormalize,
+  'positions.title': mapNormalize,
+};
 
-    results.forEach(profile => {
-      if (!profile.matches) {
-        profile.matches = {};
-      }
+function launch(file, port) {
+  console.log(`launching '${file}' on port ${port}`);
 
-      const matches = skills.map(name => {
-        const skilled = indices.skilled[name];
-        if (!skilled) return undefined;
+  const startTimer = timer(`${file} started in`).start();
 
-        const skill = skilled[profile.id];
-        if (!skill) return undefined;
+  // Init data
 
-        const endorsements = indices.endorsements[name];
-
-        const { endorsementCount } = skill;
-
-        skill.percentile = percentile(endorsements, endorsementCount);
-
-        const superEndorsementCount = (skill.endorsers || []).reduce((r, e) => r + (skilled[e] ? 1 : 0), 0);
-        delete skill.superEndorsementCount;
-        if (superEndorsementCount) {
-          skill.superEndorsementCount = superEndorsementCount;
-        }
-
-        return skill;
-      });
-
-      const count = matches.filter(e => e).length;
-
-      const score = Math.pow(10, count + 6) +
-              matches.reduce(
-                (r, e, i) => r + Math.pow(10, matches.length - i) * (e && e.endorsementCount || 0),
-                0
-              );
-
-      profile.matches['skills.name'] = matches.filter(e => e);
-      profile.score = score;
-    });
-
-    results = results.sort((a, b) => b.score - a.score);
-  }
+  const { search, maps, indices } = prepareData(file);
 
   function getSearches({ links = false } = {}) {
     const file = `./data/search.json`;
@@ -938,28 +622,46 @@ function launch(file, port) {
     const object = searches.filter(e => e.key === name)[0];
     if (!object) return httpError(404, 'no such saved search');
 
-    const profiles = getProfiles(object.value.query);
+    const { count, _links } = getProfiles(object.value.query);
 
     return {
       title: name,
       query: object.value.query,
       descrition: object.value.description,
-      count: profiles.count,
+      count: count,
       _links: {
-        profiles: profiles._links.profile,
+        profiles: _links.profile,
       }
     };
   }
 
+  function sortByFieldScores(arr, field) {
+    return arr.sort((a, b) => {
+      a = a.scores[field];
+      b = b.scores[field];
+
+      if (typeof a === 'number' && typeof b === 'number') return b - a;
+
+      let r;
+      b.some((scores, i) => r = scores - a[i]);
+      return r;
+    });
+  }
+
   function getProfiles(query) {
-    let results = profiles;
+    let results = maps.profiles;
     results.forEach(p => delete p.matches);
 
+    query = reduceObject(query, (r, value, key) => {
+      const formatter = normalizeQueryField[key];
+      if (!formatter) return r;
+
+      r[key] = formatter(arrayify(value));
+      return r;
+    }, {});
+
     if (query.savedSearch) {
-      const savedSearches = unique(flatMap(
-        arrayify(query.savedSearch),
-        e => e.split(',')
-      )).filter(e => e);
+      const savedSearches = query.savedSearch;
 
       if (savedSearches.length) {
         const searches = getSearches();
@@ -971,65 +673,107 @@ function launch(file, port) {
     if (query.q) {
       query = mergeQueries(query, parseQuery(query.q));
 
-      query.q = query.q.map(normalize);
+      query = reduceObject(query, (r, value, key) => {
+        r[key] = normalizeQueryField[key](arrayify(value));
+        return r;
+      }, {});
 
-      results = search(query.q).map(id => indices.profiles[id]);
+      if (query.q.length) {
+        results = search(query.q);
+      }
     }
 
     if (query.name) {
-      query.name = arrayify(query.name).map(normalize);
-      results = results.filter(p => normalize(p.name).includes(query.name));
+      results = filterProfiles(results, 'name', query.name, true, isIncludedIn);
     }
 
     if (query.seniority) {
-      const seniority = arrayify(query.seniority).map(parseRange);
-      results = results.filter(p => seniority.every(seniority => p.seniority >= seniority[0] && p.seniority <= seniority[1]));
-      results.forEach(profile => {
-        if (!profile.matches) {
-          profile.matches = {};
-        }
+      results = filterProfiles(results, 'seniority', query.seniority, true, isInRange, e => e);
 
-        profile.matches.seniority = profile.seniority;
+      results.forEach(profile => {
+        profile.scores['seniority'] = profile.seniority;
       });
+
+      results = sortByFieldScores(results, 'seniority');
     }
 
     if (query.location) {
-      query.location = arrayify(query.location).map(normalize);
-      results = results.filter(p => normalize(p.location).includes(query.location));
-
-      results.forEach(profile => {
-        if (!profile.matches) {
-          profile.matches = {};
-        }
-
-        profile.matches.location = profile.location;
-      });
+      results = filterProfiles(results, 'location', query.location, true, isIncludedIn);
     }
 
     if (query['skills.name']) {
-      const skillNames = unique(flatMap(
-        arrayify(query['skills.name']),
-        e => e.split(',')
-      )).filter(e => e);
+      results = filterProfiles(results, 'skills.name', query['skills.name'], true);
 
-      query['skills.name'] = skillNames;
+      results.forEach(profile => {
+        const matches = profile.matches['skills.name'];
 
-      results = filterProfiles(results, 'skills.name', skillNames, false);
+        const counts = matches.reduce((r, match) => {
+          if (match) {
+            const bestMatch = sortByEndorsementCountDesc(match)[0];
+            const maxCount = toNumber(bestMatch.endorsementCount);
+            const maxSuperCount = toNumber(bestMatch.superEndorsementCount);
 
-      computeMatches(results, skillNames);
+            r.push(maxCount, maxSuperCount);
+          } else {
+            r.push(-Infinity);
+          }
+          return r;
+        }, []);
+        counts.unshift(filterExisting(matches).length);
+
+        profile.scores['skills.name'] = counts;
+      });
+
+      results = sortByFieldScores(results, 'skills.name');
     }
 
     if (query['positions.companyName']) {
-      const companyName = query['positions.companyName'];
-      results = filterProfiles(results, 'positions.companyName', companyName);
+      results = filterProfiles(results, 'positions.companyName', query['positions.companyName'], true);
+
+      results.forEach(profile => {
+        const matches = profile.matches['positions.companyName'];
+
+        matches.forEach(
+          match => {
+            if (match && match.length) {
+              match.forEach(match => match.seniority = diffDates(match.startDate, match.endDate));
+            }
+          }
+        );
+
+        const counts = matches.reduce((r, match) => {
+          if (match) {
+            match = sortBySeniorityDesc(match)[0];
+            r.push(toYear(match.seniority), match.startDate);
+          } else {
+            r.push(0, 0);
+          }
+          return r;
+        }, []);
+
+        profile.scores['positions.companyName'] = counts;
+      });
+
+      results = sortByFieldScores(results, 'positions.companyName');
     }
 
     if (query['positions.title']) {
-      const title = query['positions.title'];
-      results = filterProfiles(results, 'positions.title', title);
+      results = filterProfiles(results, 'positions.title', query['positions.title']);
+
+      results.forEach(profile => {
+        const matches = profile.matches['positions.title'];
+
+        matches.forEach(
+          match => {
+            if (match && match.length) {
+              match.forEach(match => match.seniority = diffDates(match.startDate, match.endDate));
+            }
+          }
+        );
+      });
     }
 
-    const total = profiles.length;
+    const total = maps.profiles.length;
     const count = results.length;
 
     return Object.assign(
@@ -1041,18 +785,22 @@ function launch(file, port) {
       } : {},
       {
         _links: {
-          profile: results.map(format.profile),
+          profile: results.map(format.profiles),
         },
       },
       formatProfilesTemplates(query)
     );
   }
 
+  const formatProfileIds = formatIds(indices.profiles, 'profiles', 'name');
+  const formatProfileSkills = formatProfileItems.skills(indices);
+  const formatProfilePositions = formatProfileItems.positions(indices);
+
   function getProfile({ id }) {
     const profile = indices.profiles[id];
     if (!profile) return httpError(404, 'no such profile');
 
-    delete profile.matches;
+    maps.profiles.forEach(p => delete p.matches);
 
     let result = JSON.parse(JSON.stringify(profile));
 
@@ -1089,10 +837,9 @@ function launch(file, port) {
     const matrice = indices.skillsMatrice[name];
     if (!matrice) return [];
 
-    return matrice.keys
-      .sort((a, b) =>
-            indices.skillsMatrice[name].skills[b] -
-            indices.skillsMatrice[name].skills[a])
+    const sort = sortWith(e => indices.skillsMatrice[name].skills[e], true);
+
+    return sort(matrice.keys)
       .map(child => {
         const count = indices.skillsMatrice[name].skills[child];
         return { name: child, count };
@@ -1103,10 +850,12 @@ function launch(file, port) {
     const topSkills = indices.topSkills[name];
     if (!topSkills) return [];
 
-    return topSkills
-      .sort((a, b) =>
-            indices.skillsMatrice[name].skills[b] -
-            indices.skillsMatrice[name].skills[a])
+    const sort = sortWith(
+      composeArrayArgs(mapArgs(e => indices.skillsMatrice[name].skills[e]), compareInts),
+      true
+    );
+
+    return sort(topSkills)
       .map(child => {
         const count = indices.skillsMatrice[name].skills[child];
         const childCount = indices['skills.name'][child].length;
@@ -1210,12 +959,12 @@ function launch(file, port) {
       _embedded: {
         profiles: closure(
           getProfiles({ [collection]: name }),
-          profiles => ({
+          ({ count, _links }) => ({
             profile: {
-              count: profiles.count,
+              count,
               href: `/profiles?${current}`,
               _links: {
-                profiles: profiles._links.profile.slice(0, 10),
+                profiles: _links.profile.slice(0, 10),
               },
             },
           })
@@ -1238,92 +987,112 @@ function launch(file, port) {
 
     const matches = fields.reduce((r, field) => {
       const exact = indices[field][q] || [];
-      r.exact.push(Object.assign(
-        {
-          field,
-          count: exact.length,
-        },
-        field !== 'name' ? {
-          href: `/${field}/${encodeURIComponent(q)}`,
-        } : {
-          href: `/profiles?name=${encodeURIComponent(q)}`,
-          profiles: exact.map(({ name: title, id }) => ({
-            title,
-            href: `/profiles/${id}`,
-          })),
-        }
-      ));
+      if (exact.length) {
+        r.exact.push(Object.assign(
+          {
+            field,
+            count: exact.length,
+          },
+          field !== 'name' ? {
+            href: `/${field}/${encodeURIComponent(q)}`,
+          } : {
+            href: `/profiles?name=${encodeURIComponent(q)}`,
+            profiles: exact.map(({ name: title, id }) => ({
+              title,
+              href: `/profiles/${id}`,
+            })),
+          }
+        ));
+      }
 
       const partial = maps[field].filter(e => e.name !== q && e.name.includes(q));
-      r.partial.push(Object.assign(
-        {
-          field,
-          count: partial.length,
-        },
-        {
-          href: field !== 'name' ?
-            `/${field}?q=${encodeURIComponent(q)}` :
-            `/profiles?name=${encodeURIComponent(q)}`,
-        },
-        {
-          items: sortByCountDesc(partial.map(({ name, count }) => ({
-            title: name,
-            count,
+      if (partial.length) {
+        r.partial.push(Object.assign(
+          {
+            field,
+            count: partial.length,
+          },
+          {
             href: field !== 'name' ?
-              `/${field}/${encodeURIComponent(name)}` :
-              `/profiles?name=${encodeURIComponent(name)}`,
-          }))).slice(0, 3),
-        }
-      ));
+              `/${field}?q=${encodeURIComponent(q)}` :
+              `/profiles?name=${encodeURIComponent(q)}`,
+          },
+          {
+            items: sortByCountDesc(partial.map(({ name, count }) => ({
+              title: name,
+              count,
+              href: field !== 'name' ?
+                `/${field}/${encodeURIComponent(name)}` :
+                `/profiles?name=${encodeURIComponent(name)}`,
+            }))).slice(0, 3),
+          }
+        ));
+      }
       return r;
     }, { exact: [], partial: [] });
 
-    matches.exact = filterByCountPositive(sortByCountDesc(matches.exact));
+    matches.exact = sortByCountDesc(matches.exact);
 
-    matches.partial = filterByCountPositive(matches.partial.sort((a, b) => {
-      return b.items.reduce((r, e) => Math.max(r, e.count), 0) -
-        a.items.reduce((r, e) => Math.max(r, e.count), 0);
-    }));
+    matches.partial = matches.partial.sort((a, b) => {
+      return b.items[0].count - a.items[0].count;
+    });
 
     const searches = getSearches();
 
     const sresults = searches.reduce((r, { value: { query }, key }) => {
       const splitQ = q.split(' ').map(normalize);
-      const normalizedKey = normalize(key).split(' ');
+      const normalizedKey = normalize(key);
+      const splitKey = normalizedKey.split(' ');
       const normalizedQuery = normalize(JSON.stringify(query));
 
-      const includedInKey = intersection(normalizedKey, splitQ).length === splitQ.length ||
+      const includedInKey =
+              normalizedKey.includes(q) ||
+              intersection(splitKey, splitQ).length === splitQ.length ||
               normalizedQuery.includes(q);
-      const includingKey = intersection(normalizedKey, splitQ).length === normalizedKey.length ||
+      const includingKey =
+              q.includes(normalizedKey) ||
+              intersection(splitKey, splitQ).length === splitKey.length ||
               q.includes(normalizedQuery);
 
       if (includedInKey || includingKey) {
         if (includedInKey) {
-          const count = getProfiles(query).count;
+          const { count } = getProfiles(query);
+          r.profiles[key] = { key, count };
           r.including.push({ title: key, count, href: `/savedSearches/${key}` });
         }
 
         if (includingKey) {
-          const indexOf = q.indexOf(key);
+          const scores = splitKey.map(part => q.indexOf(part));
           r.includedIn.push({
             title: key,
-            indexOf: indexOf === -1 ? Infinity : indexOf,
+            scores,
           });
         }
       }
       return r;
-    }, { including: [], includedIn: [] });
+    }, { including: [], includedIn: [], profiles: {} });
 
     sresults.including = sortByCountDesc(sresults.including);
 
     if (sresults.includedIn.length) {
-      const titles = get(sresults.includedIn.sort((a, b) => a.indexOf - b.indexOf), 'title');
+      sresults.includedIn.sort((a, b) => {
+        let r;
+        a.scores.some((scores, i) => r = scores - b.scores[i]);
+        return r;
+      });
+
+      const titles = getDeep(sresults.includedIn, 'title');
+
+      const { count } = sresults.profiles[titles.join(',')] ||
+              getProfiles({ savedSearch: titles.join(',') });
 
       sresults.includedIn = {
         title: titles.join(' & '),
+        count,
         href: `/profiles?savedSearch=${titles.join(',')}`,
       };
     }
+    delete sresults.profiles;
 
     return {
       _links: Object.assign(
@@ -1354,7 +1123,7 @@ function launch(file, port) {
   }
 
   function inspect({ variable, field }) {
-    return { [field]: get(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
+    return { [field]: getDeepRec(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
   }
 
   // App setup
@@ -1474,12 +1243,12 @@ routes:<br/>${routes.map(route => `<a href="${route}">${route}</a>`).join('<br/>
 
 let port = 3000;
 
-readdir('profiles', (err, profiles) => {
-  const apps = profiles
+readdir('profiles', (err, dbs) => {
+  const apps = dbs
           .filter(file => file.match('json'))
-          .filter(file => file.match('huitre'))
+//          .filter(file => file.match('huitre'))
 //          .filter(file => file.match('aka'))
-//          .filter(file => file.match('bob'))
+          .filter(file => file.match('bob'))
 //          .filter(file => file.match('klad'))
           .map(profile => {
             launch(profile, port);
