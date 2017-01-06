@@ -1,6 +1,6 @@
 const { normalize } = require('./string');
-const { pushIn, arrayify, mapObject, reduceObject } = require('./object');
-const { getDeep } = require('./getDeep');
+const { pushIn, arrayify, mapObjectToArray, reduceObject } = require('./object');
+const { deepGet } = require('./deep-get');
 
 exports = module.exports = {
   indexObject(obj, format = (k, v) => k) {
@@ -13,10 +13,10 @@ exports = module.exports = {
   index(arr, field, unique, format = e => e) {
     if (!arr || !arr.length) return {};
 
-    const formatItem = typeof format === 'function' ? format : e => getDeep(e, format);
+    const formatItem = typeof format === 'function' ? format : e => deepGet(e, format);
 
     const getKey = field ?
-            e => (typeof field === 'function' ? field(e) : getDeep(e, field)) :
+            e => (typeof field === 'function' ? field(e) : deepGet(e, field)) :
           e => e;
 
     return arr.reduce((r, e) => {
@@ -33,9 +33,9 @@ exports = module.exports = {
   mapFieldObject(obj, formatItems = e => e) {
     const itemsFormatter = typeof formatItems === 'function' ?
             formatItems :
-            (!formatItems ? e => e : items => getDeep(items, formatItems));
+            (!formatItems ? e => e : items => deepGet(items, formatItems));
 
-    return mapObject(obj, (items, name) => {
+    return mapObjectToArray(obj, (items, name) => {
       const formatted = itemsFormatter(items, name);
 
       return {

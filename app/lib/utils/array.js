@@ -1,5 +1,5 @@
-const { composeArrayArgs, mapArgs } = require('./function');
-const { toNumber } = require('./math');
+const { compose, curry, applyTo } = require('./function');
+const { toNumber, opposite } = require('./math');
 
 exports = module.exports = {
   unique(arr) {
@@ -30,27 +30,24 @@ exports = module.exports = {
     return exports.flatten(arr.map(func));
   },
 
+  applyReduceTo: curry(applyTo)('reduce'),
+  applySortTo: curry(applyTo)('sort'),
+  applyFilterTo: curry(applyTo)('filter'),
+
+  mapToObject(arr, func) {
+    return arr.reduce((r, key) => (r[key] = func(key), r), {});
+  },
+
   sortWith(func, reverse = false) {
-    const coef = reverse ? -1 : 1;
-    return arr => arr.sort((a, b) => func(a, b) * coef);
+    return exports.applySortTo(reverse ? compose(func, opposite) : func);
   },
 
-  sortBy(field, func, reverse = false) {
-    const getField = typeof field === 'function' ? field : e => e[field];
-
-    return exports.sortWith(composeArrayArgs(mapArgs(getField), func), reverse);
-  },
-
-  filterWith(func) {
-    return arr => arr.filter(func);
-  },
-
-  mapWith(func) {
-    return arr => arr.map(func);
+  sortByField(field, func, reverse = false) {
+    return exports.sortWith((a, b) => func(a[field], b[field]), reverse);
   },
 
   filterBy(field, func) {
-    return exports.filterWith(e => func(e[field]));
+    return exports.applyFilterTo(e => func(e[field]));
   },
 
   compareStrings(a, b) {
@@ -63,5 +60,9 @@ exports = module.exports = {
 
   compareDates(a, b) {
     return b[0] !== a[0] ? b[0] - a[0] : (a[1] || b[1]);
+  },
+
+  compareByField(field, compare) {
+    return (a, b) => compare(a[field], b[field]);
   },
 };

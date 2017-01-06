@@ -12,10 +12,12 @@ exports = module.exports = {
     return (...args) => args.map(func);
   },
 
+  applyTo(method, ...args) {
+    return obj => obj[method](...args);
+  },
+
   curry(func) {
-    return (...first) => {
-      return (...then) => func(...first, ...then);
-    };
+    return (...first) => (...then) => func(...first, ...then);
   },
 
   compose(func, ...funcs) {

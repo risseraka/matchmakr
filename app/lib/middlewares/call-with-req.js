@@ -1,4 +1,4 @@
-const { mapObject } = require('../utils/object');
+const { mapObjectToArray } = require('../utils/object');
 
 exports = module.exports = {
   stringifyToHTML(obj) {
@@ -6,7 +6,7 @@ exports = module.exports = {
       return obj !== undefined && obj !== null ? obj.toString() : '';
     }
 
-    const mapped = mapObject(
+    const mapped = mapObjectToArray(
       obj,
       (v, k) => {
         const length = Array.isArray(v) ? ` (${v.length})`: '';

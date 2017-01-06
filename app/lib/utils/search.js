@@ -1,6 +1,6 @@
 const { normalize } = require('./string');
 const { stringify, arrayify } = require('./object');
-const { index } = require('./mapIndex');
+const { index } = require('./map-index');
 
 exports = module.exports = {
   Search(haystack, exclude = []) {

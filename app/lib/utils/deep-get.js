@@ -1,7 +1,7 @@
 const { flatMap } = require('./array');
 
 exports = module.exports = {
-  getDeepRec(obj, fields, flat) {
+  deepGetRec(obj, fields, flat) {
     if (!obj || !fields) return obj;
 
     if (typeof fields === 'string') {
@@ -16,8 +16,8 @@ exports = module.exports = {
       if (!obj) return null;
       if (Array.isArray(obj) && !(fields[i] in obj)) {
         return flat ?
-          flatMap(obj, (o => exports.getDeepRec(o, fields.slice(i)))) :
-          obj.map(o => exports.getDeepRec(o, fields.slice(i)));
+          flatMap(obj, (o => exports.deepGetRec(o, fields.slice(i)))) :
+          obj.map(o => exports.deepGetRec(o, fields.slice(i)));
       }
       try {
         obj = obj[fields[i]];
@@ -30,11 +30,11 @@ exports = module.exports = {
     return obj;
   },
 
-  getDeep(obj, field, up = false) {
+  deepGet(obj, field, up = false) {
     if (!obj || !field) return undefined;
 
     if (Array.isArray(obj)) {
-      return obj.map(o => exports.getDeep(o, field, up));
+      return obj.map(o => exports.deepGet(o, field, up));
     }
 
     if (field.indexOf('.') === -1) {
@@ -43,6 +43,6 @@ exports = module.exports = {
     }
 
     const [part, ...rest] = field.split('.');
-    return exports.getDeep(obj[part], rest, up);
+    return exports.deepGet(obj[part], rest, up);
   },
 };

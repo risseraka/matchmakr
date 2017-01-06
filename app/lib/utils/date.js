@@ -5,7 +5,7 @@ exports = module.exports = {
   YEAR: 365.25 * 24 * 60 * 60 * 1000,
 
   diffDateFromNow(date) {
-    return Date.now() - new Date(date);
+    return Date.now() - new Date(date || Date.now());
   },
 
   diffDates(a, b) {

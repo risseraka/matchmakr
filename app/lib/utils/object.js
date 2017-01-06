@@ -3,8 +3,12 @@ exports = module.exports = {
     return obj[field];
   },
 
+  getFrom(obj) {
+    return field => obj[field];
+  },
+
   forEachObject(obj, func) {
-    if (!obj) return obj;
+    if (!obj) return undefined;
 
     return Object.keys(obj).forEach(key => func(obj[key], key));
   },
@@ -12,15 +16,19 @@ exports = module.exports = {
   reduceObject(obj, func, acc) {
     if (!obj) return acc;
 
-    return Object.keys(obj).reduce((r, key, i, keys) => {
-      return func(r, obj[key], key, keys);
-    }, acc);
+    return Object.keys(obj).reduce((r, key, i, keys) => func(r, obj[key], key, obj), acc);
   },
 
   mapObject(obj, func) {
+    if (!obj) return {};
+
+    return exports.reduceObject(obj, (r, value, key, obj) => (r[key] = func(value, key, obj), r), {});
+  },
+
+  mapObjectToArray(obj, func) {
     if (!obj) return [];
 
-    return Object.keys(obj).map(key => func(obj[key], key));
+    return exports.reduceObject(obj, (r, value, key, obj) => (r.push(func(value, key, obj)), r), []);
   },
 
   pluck(obj, ...fields) {
@@ -63,6 +71,6 @@ exports = module.exports = {
 
   stringify(obj, exclude = []) {
     if (typeof obj !== 'object') return obj ? obj.toString() : '';
-    return exports.mapObject(obj, (v, k) => !exclude.includes(k) ? exports.stringify(v): '');
+    return exports.mapObjectToArray(obj, (v, k) => !exclude.includes(k) ? exports.stringify(v): '');
   },
 };
