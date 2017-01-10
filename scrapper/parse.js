@@ -44,12 +44,17 @@ function loadPages(pages) {
 const parse = {
   info(data) {
     const info = data.BasicInfo.basic_info;
+    const contactInfo = (data.ContactInfo || {}).contact_info || {};
 
     const { fullname: name, location_highlight: location } = info;
+    const { phones = [], emails = [] } = contactInfo;
+
     return {
       id: info.memberID,
       name,
       location,
+      emails: emails.map(email => email.email),
+      phones: phones.map(phone => phone.number),
     };
   },
   skills(data) {

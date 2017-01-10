@@ -3,7 +3,7 @@ exports = module.exports = {
   normalize(str) {
     return typeof str === 'string' && str
       .normalize('NFD')
-      .replace(/[-.,!\/\]\[\(\)]/g, '')
+      .replace(/[-.,!*\/\]\[\(\)]/g, '')
       .replace(/ +/g, ' ')
       .replace(/[\u0300-\u036f]/g, '')
       .trim()

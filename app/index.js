@@ -8,6 +8,7 @@ const {
 
 const {
   closure,
+  compose,
 } = require('./lib/utils/function');
 
 const {
@@ -17,8 +18,11 @@ const {
 const timer = require('./lib/utils/timer');
 
 const {
-  errorHandler,
   httpError,
+} = require('./lib/utils/error');
+
+const {
+  errorHandler,
 } = require('./lib/middlewares/error-handler');
 
 const {
@@ -44,16 +48,21 @@ const morgan = require('morgan');
 const prepareData = require('./lib/prepare-data');
 const getSearches = require('./lib/searches');
 
-const getIndexRoute = require('./lib/routes/get-index');
+// routes
 
+const getIndexRoute = require('./lib/routes/get-index');
 const getProfilesRoute = require('./lib/routes/get-profiles');
 const getProfileRoute = require('./lib/routes/get-profile');
-
 const mapFieldRoutes = require('./lib/routes/get-map-field');
 const getSuggestRoute = require('./lib/routes/get-suggest');
 const getSearchRoute = require('./lib/routes/get-search');
 const getSkillTopSkillsRoute = require('./lib/routes/get-skill-top-skills');
 const postSaveRoute = require('./lib/routes/post-save');
+
+// rendering
+
+const getProfilesFormatter = require('./lib/routes/get-profiles-format');
+const getProfileFormatter = require ('./lib/routes/get-profile-format');
 
 function launch(file, port) {
   console.log(`launching '${file}' on port ${port}`);
@@ -64,7 +73,7 @@ function launch(file, port) {
 
   const data = prepareData(file);
 
-  const { search, maps, indices } = data;
+  const { search, maps, indices, table } = data;
 
   const routes = [];
 
@@ -74,6 +83,9 @@ function launch(file, port) {
   const buildMapFieldRoutes = mapFieldRoutes(data);
   const getSuggest = getSuggestRoute(data);
 
+  const formatGetProfiles = getProfilesFormatter(data);
+  const formatGetProfile = getProfileFormatter(data);
+
   const mapFields = [
     'name',
     'location',
@@ -81,6 +93,7 @@ function launch(file, port) {
     'skills.name',
     'positions.companyName',
     'positions.title',
+    'relations',
   ];
 
   const mapRoutes = mapToObject(mapFields, buildMapFieldRoutes);
@@ -88,6 +101,7 @@ function launch(file, port) {
   const getSearch = getSearchRoute(data);
   const getSkillTopSkills = getSkillTopSkillsRoute(data);
   const postSave = postSaveRoute(data);
+  const postAppend = postSaveRoute.append(data);
 
   function inspect({ variable, field }) {
     return { [field]: deepGetRec(eval(variable.replace(/[^a-zA-Z0-9.\[\]']/g, '')), field) };
@@ -117,8 +131,124 @@ function launch(file, port) {
 
       routes.push('');
 
-      get('/profiles', callWithReqQuery(getProfiles));
-      get('/profiles/:id', callWithReqParams(getProfile));
+      get('/profiles', callWithReqQuery(compose(getProfiles, formatGetProfiles)));
+      get('/profiles/:id', callWithReqParams(compose(getProfile, formatGetProfile)));
+
+      function clone(obj) {
+        return JSON.parse(JSON.stringify(obj));
+      }
+
+      const patchesTable = `${file}_patches`;
+      const patchesFile = `./data/${patchesTable}.json`;
+
+      function getPatches(profile) {
+        const { id } = profile;
+
+        let all;
+        try {
+          all = JSON.parse(require('fs').readFileSync(`${patchesFile}`));
+        } catch (e) {
+          console.trace(e);
+          throw e;
+        }
+
+        const patches = all[id] || [];
+
+        return patches;
+      }
+
+      function applyPatches(profile) {
+        const jsonpatch = require('fast-json-patch');
+
+        const patches = getPatches(profile);
+
+        jsonpatch.apply(profile, patches);
+
+        return profile;
+      }
+
+      app.get('/table/:id', (req, res) => {
+        const { id } = req.params;
+
+        const profiles = table.get('profiles');
+        return res.send(profiles);
+        res.send(profiles[id]);
+      });
+
+      app.patch('/profiles/:id', (req, res) => {
+        const jsonpatch = require('fast-json-patch');
+
+        const { body } = req;
+        const { id } = req.params;
+
+        let profile = indices.profiles[id];
+        if (!profile) throw httpError(404, 'no such profile');
+
+        profile = clone(profile);
+
+        const patches = getPatches({ id });
+
+        console.log(patches);
+
+        if (!patches.length) {
+          postSave({ table: patchesTable, key: id, value: jsonpatch.compare({}, profile) });
+        } else {
+          jsonpatch.apply(profile, patches);
+        }
+
+        const observer = jsonpatch.observe(profile);
+
+        Object.assign(profile, body);
+
+        const patch = jsonpatch.generate(observer);
+        if (!patch.length) return res.send('nothing to do');
+
+        return res.send(postAppend({ table: patchesTable, key: id, value: patch }));
+      });
+
+      app.get('/patches/:id', (req, res) => {
+        const { id } = req.params;
+
+        const patches = getPatches({ id });
+
+        console.log(patches);
+
+        if (!patches.length) throw httpError(404, 'no patches for this profile');
+
+        res.send(patches);
+      });
+
+      app.post('/patches/:id/save', (req, res) => {
+        const jsonpatch = require('fast-json-patch');
+
+        const { id } = req.params;
+
+        const profile = indices.profiles[id];
+        if (!profile) throw httpError(404, 'no such profile');
+
+        applyPatches(profile);
+
+        return res.send('ok');
+      });
+
+      app.post('/patches/:id/compact', (req, res) => {
+        const jsonpatch = require('fast-json-patch');
+
+        const { id } = req.params;
+
+        const patches = getPatches({ id });
+
+        let profile = indices.profiles[id];
+        if (!profile) throw httpError(404, 'no such profile');
+
+        profile = clone(profile);
+
+        const observer = jsonpatch.observe(profile);
+
+        applyPatches(profile);
+
+        return res.send(jsonpatch.generate(observer));
+      });
 
       routes.push('');
 
@@ -163,7 +293,7 @@ function launch(file, port) {
 
       routes.push('');
 
-      get('/relations', callWithReqQuery(mapRoutes['relations']));
+      get('/relations', callWithReqQuery(mapRoutes['relations'].getMapField));
 
       routes.push('');
 
@@ -172,6 +302,18 @@ function launch(file, port) {
       routes.push('');
 
       app.post('/save', callWithReqBody(postSave));
+
+      /*
+      app.get('/fuzzy/:word', (req, res) => {
+        const fuzzies = indices.fuzzy;
+
+        const fuzzy = fuzzies.method(req.params.word);
+
+        const skills = fuzzies[fuzzy];
+
+        res.send({ fuzzy, skills });
+      });
+       */
 
       app.get('/inspect/:variable/:field', callWithReqParams(inspect));
       app.get('/stats', (req, res) => res.send(process.memoryUsage()));
@@ -193,8 +335,9 @@ let port = 3000;
 readdir('profiles', (err, dbs) => {
   const apps = dbs
           .filter(file => file.match('json'))
-          .filter(file => file.match('huitre'))
-//          .filter(file => file.match('aka'))
+          .map(file => file.split('.')[0])
+//          .filter(file => file.match('huitre'))
+          .filter(file => file.match('aka'))
 //          .filter(file => file.match('bob'))
 //          .filter(file => file.match('klad'))
           .map(profile => {

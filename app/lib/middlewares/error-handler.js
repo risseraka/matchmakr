@@ -1,10 +1,4 @@
 exports = module.exports = {
-  httpError(code, message) {
-    const e = new Error(message);
-    e.code = code;
-    throw e;
-  },
-
   errorHandler(err, req, res, next) {
     res.status(err.code || 500).format({
       html: () => res.send(`

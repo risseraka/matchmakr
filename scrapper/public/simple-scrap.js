@@ -65,9 +65,11 @@ function scrapProfiles({ memberId, profiles }) {
 
     const p = 'profile_v2_connections%2Edistance%3A1';
 
-    const urls = profiles.map(
-      id => `https://www.linkedin.com/profile/mappers?id=${id}&x-a=${a}&x-p=${p}`
-    );
+    const urls = [memberId]
+//            .concat(profiles)
+            .map(
+              id => `https://www.linkedin.com/profile/mappers?id=${id}&x-a=${a}&x-p=${p}`
+            );
 
     return Scrap({
       urls,
@@ -119,7 +121,7 @@ function getCurrentUserId() {
 
       write(`got member id: ${memberId}`);
 
-      return memberId;
+      return { memberId };
     });
 }
 
@@ -127,7 +129,7 @@ function start() {
   write('starting scrap');
 
   getCurrentUserId()
-    .then(memberId => scrapConnections({ memberId }))
+//    .then(scrapConnections)
     .then(({ memberId, connections }) => scrapProfiles({
       memberId,
       profiles: connections,

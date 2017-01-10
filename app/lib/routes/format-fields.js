@@ -55,37 +55,36 @@ function formatFieldItem(field) {
   };
 }
 
+const formatSkillMatch = match => Object.assign(
+  pluck(match, 'name', 'endorsementCount', 'percentile', 'superEndorsementCount'),
+  { _links: { href: `/skills.name/${encodeURIComponent(normalize(match.name))}` } }
+);
+
+const formatPositionMatch = match => Object.assign(
+  pluck(match, 'companyName', 'title', 'startDate', 'endDate'),
+  { seniority: toYear(match.seniority) },
+  match.startDate ? { startDate: new Date(match.startDate).toISOString().substr(0, 7) } : {},
+  match.endDate ? { endDate: new Date(match.endDate).toISOString().substr(0, 7) } : {},
+  { _links: { href: `/positions.title/${encodeURIComponent(normalize(match.title))}` } }
+);
+
 const formatMatch = {
-  name: match => match,
-  location: match => match,
   seniority: toYear,
-  'skills.name': match => Object.assign(
-    pluck(match, 'name', 'endorsementCount', 'percentile', 'superEndorsementCount'),
-    { _links: { href: `/skills.name/${encodeURIComponent(normalize(match.name))}` } }
-  ),
-  'positions.companyName': match => Object.assign(
-    pluck(match, 'companyName', 'title', 'startDate', 'endDate'),
-    { seniority: toYear(match.seniority) },
-    match.startDate ? { startDate: new Date(match.startDate).toISOString().substr(0, 7) } : {},
-    match.endDate ? { endDate: new Date(match.endDate).toISOString().substr(0, 7) } : {},
-    { _links: { href: `/positions.title/${encodeURIComponent(normalize(match.title))}` } }
-  ),
-  'positions.title': match => Object.assign(
-    pluck(match, 'title', 'companyName', 'startDate', 'endDate'),
-    { seniority: toYear(match.seniority) },
-    match.startDate ? { startDate: new Date(match.startDate).toISOString().substr(0, 7) } : {},
-    match.endDate ? { endDate: new Date(match.endDate).toISOString().substr(0, 7) } : {},
-    { _links: { href: `/positions.title/${encodeURIComponent(normalize(match.title))}` } }
-  ),
+  'skills.name': formatSkillMatch,
+  'positions.companyName': formatPositionMatch,
+  'positions.title': formatPositionMatch,
 };
 
 function formatProfilesMatches(matches) {
   return {
     matches: mapObject(
       matches,
-      (match, field) => !Array.isArray(match) ?
-        formatMatch[field](match) :
-        filterExisting(flatten(match)).map(formatMatch[field])
+      (match, field) => {
+        const formatter = formatMatch[field] || (e => e);
+        return !Array.isArray(match) ?
+          formatter(match) :
+          filterExisting(flatten(match)).map(formatter);
+      }
     ),
   };
 }
@@ -100,7 +99,8 @@ function formatProfiles(profile) {
       title,
       href: `/profiles/${id}`,
     },
-    config.displayScores && scores && scores.length ? { score: score.join(','), scores } : {},
+    config.displayScores && score ? { score: score.join(',') } : {},
+//    config.displayScores && scores ? { scores } : {},
     matches ? formatProfilesMatches(matches) : {}
   );
 }

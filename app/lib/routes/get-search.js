@@ -1,12 +1,18 @@
 const {
+  compose,
+} = require('../utils/function');
+
+const {
   httpError,
-} = require('../middlewares/error-handler');
+} = require('../utils/error');
 
 const getSearches = require('../searches');
+
 const getProfilesRoute = require('./get-profiles');
+const getProfilesFormatter = require ('./get-profiles-format');
 
 exports = module.exports = data => {
-  const getProfiles = getProfilesRoute(data);
+  const getProfiles = compose(getProfilesRoute(data), getProfilesFormatter(data));
 
   function getSearch({ name }) {
     const searches = getSearches();

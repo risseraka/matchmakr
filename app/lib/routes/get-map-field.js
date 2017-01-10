@@ -1,6 +1,7 @@
 const {
   curry,
   closure,
+  compose,
 } = require('../utils/function');
 
 const {
@@ -20,11 +21,12 @@ const {
 
 const {
   httpError,
-} = require('../middlewares/error-handler');
+} = require('../utils/error');
 
 const getProfilesRoute = require('./get-profiles');
+const getProfilesFormatter = require ('./get-profiles-format');
 
-const format = require('./format');
+const fieldsFormatters = require('./format-fields');
 const builder = require('./builder');
 
 const sortByCountDesc = sortByField('count', compareInts, true);
@@ -32,7 +34,7 @@ const sortByCountDesc = sortByField('count', compareInts, true);
 exports = module.exports = data => {
   const { indices, maps } = data;
 
-  const getProfiles = getProfilesRoute(data);
+  const getProfiles = compose(getProfilesRoute(data), getProfilesFormatter(data));
 
   function getSkillRelatedSkillsMap({ name }) {
     const matrice = indices.skillsMatrice[name];
@@ -66,7 +68,7 @@ exports = module.exports = data => {
       count !== total ? { count } : {},
       {
         _links: {
-          [field]: sortByCountDesc(results).map(format[field](totalProfiles)),
+          [field]: sortByCountDesc(results).map(fieldsFormatters[field](totalProfiles)),
         },
       }
     );
@@ -94,7 +96,7 @@ exports = module.exports = data => {
       count: items.length,
       _links: {
         self: { href: `/${field}/${name}/related/${related}` },
-        [related]: sortByCountDesc(items).map(format[related](totalProfiles, current)),
+        [related]: sortByCountDesc(items).map(fieldsFormatters[related](totalProfiles, current)),
       },
     };
   }
@@ -139,12 +141,12 @@ exports = module.exports = data => {
       _embedded: {
         profiles: closure(
           getProfiles({ [field]: name }),
-          ({ count, _links }) => ({
+          (data) => ({
             profile: {
-              count,
+              count: data.length,
               href: `/profiles?${current}`,
               _links: {
-                profiles: _links.profile.slice(0, 10),
+                profiles: console.log(data) || data._links.profile.slice(0, 10),
               },
             },
           })

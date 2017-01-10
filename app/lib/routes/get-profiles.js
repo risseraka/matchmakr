@@ -53,28 +53,47 @@ const {
   parseQuery,
 } = require('../utils/query');
 
+const rangeToYear = range => [range[0] * YEAR, range[1] * YEAR];
+
 const mapNormalize = applyTo('map', normalize);
+const mapToNumber = applyTo('map', toNumber);
+const mapParseYearRange = applyTo('map', compose(parseRange, rangeToYear));
 
 const filterExisting = applyTo('filter', e => e !== undefined && e !== null);
+const filterFalsy = applyTo('filter', e => e);
 
 const sortByEndorsementCountDesc = sortByField('endorsementCount', compareInts, true);
 const sortBySeniorityDesc = sortByField('seniority', compareInts, true);
 
-const format = require('./format');
 const builder = require('./builder');
 
-function sortByScores(query, arr) {
-  function mergeQueryScores(query) {
-    return scores => {
-      return Object.keys(query).reduce((r, field) => {
-        if (field !== 'q') {
-          return r.concat(scores[field]);
-        }
-        return r;
-      }, []);
-    };
-  }
+const getSearches = require('../searches');
 
+const queryFields = [
+  'skills.name',
+  'positions.companyName',
+  'positions.title',
+  'id',
+  'name',
+  'location',
+  'seniority',
+  'q',
+];
+
+function mergeQueryScores(query) {
+  return scores => {
+    return queryFields.reduce((r, field) => {
+      const fieldScores = scores[field];
+      if (fieldScores) {
+        r[0] += Array.isArray(fieldScores) ? filterFalsy(fieldScores).length > 0 : !!fieldScores;
+        return r.concat(scores[field]);
+      }
+      return r;
+    }, [0]);
+  };
+}
+
+function sortByScores(query, arr) {
   const mergeScores = mergeQueryScores(query);
 
   arr.forEach(e => {
@@ -96,75 +115,75 @@ function sortByScores(query, arr) {
   return sorted;
 }
 
-function filterProfilesBy({
+function filterItemsBy({
   field,
-  greedy = true,
+  matchAll = false,
   comparison = isEqual,
-  normalizeValue = normalize,
-  calcScores = e => e
+  normalize = e => e,
+  scoring = e => e,
 }) {
-  return (results, values) =>
-    results.filter(item => {
-      if (!item.scores) {
-        item.scores = {};
-      }
+  return (results, values) => {
+    const allValues = values.reduce(
+      (r, value) => {
+        if (value[0] === '+') {
+          r.matchAll.push(value.slice(1));
+        } else {
+          r.matchSome.push(value);
+        }
+        return r;
+      },
+      { matchAll: [], matchSome: [] }
+    );
 
+    const filterValues = (values, pValues) => values.map(value => {
+      const match = arrayify(pValues).filter(
+        ({ value: pValue }) => comparison(value, normalize(pValue))
+      );
+      if (match.length) return match;
+
+      return null;
+    });
+
+    return results.filter(item => {
       const pValues = deepGet(item, field, true);
       const isArray = Array.isArray(pValues);
 
-      const matches = values.map(value => {
-        const match = arrayify(pValues).filter(({ value: pValue }) => comparison(value, normalizeValue(pValue)));
-        if (match.length) return match;
+      const matchAllMatches = filterValues(allValues.matchAll, pValues);
+      const matchAllCount = filterExisting(matchAllMatches).length;
 
-        return null;
-      });
+      if (allValues.matchAll.length > 0 && matchAllCount !== allValues.matchAll.length) {
+        return false;
+      }
+
+      const matchSomeMatches = filterValues(allValues.matchSome, pValues);
+      const matchSomeCount = filterExisting(matchSomeMatches).length;
+
+      if (matchAll && matchSomeCount !== allValues.matchSome.length) {
+        return false;
+      }
+
+      if (!matchAll && matchAllCount === 0 && allValues.matchSome.length > 0 && matchSomeCount === 0) {
+        item.scores[field] = scoring(isArray ? values.map(() => undefined) : undefined, item, values);
+        return false;
+      }
+
+      const matches = matchAllMatches.concat(matchSomeMatches);
 
       const realMatches = filterExisting(matches);
 
       const { length: count } = realMatches;
 
-      if (count) {
-        if (!item.matches) {
-          item.matches = {};
-        }
+      const matchesObj = isArray ?
+              deepGet(matches, 'obj') :
+              (realMatches[0] ? realMatches[0][0].value : null);
 
-        item.matches[field] = isArray ?
-          deepGet(matches, 'obj') :
-          realMatches[0][0].value;
-        item.scores[field] = calcScores(item.matches[field], item, values);
+      item.scores[field] = scoring(matchesObj, item, values);
+
+      if (count) {
+        item.matches[field] = matchesObj;
       }
 
-      return greedy ? count : count === values.length;
-    });
-}
-
-function formatProfilesTemplates(query) {
-  return query.q ?
-    {
-      _templates: {
-        default: {
-          title: 'Save search as',
-          method: 'post',
-          action: '/save',
-          properties: [
-            { name: 'table', type: 'hidden', value: 'search' },
-            { name: 'key', type: 'text' },
-            { name: 'value', type: 'hidden', value: JSON.stringify({ query }) },
-          ],
-        },
-      },
-    } : {};
-}
-
-function filterQueryFields(queryFieldsFilters) {
-  return field => {
-    const { comparison, normalizeValue, calcScores } = queryFieldsFilters[field];
-
-    return filterProfilesBy({
-      field,
-      comparison,
-      normalizeValue,
-      calcScores,
+      return true;
     });
   };
 }
@@ -172,10 +191,11 @@ function filterQueryFields(queryFieldsFilters) {
 function applyQueryFields(queryFieldsAppliers) {
   return (query, results) =>
     reduceObject(
-      query,
-      (r, values, field) => {
-        const applier = queryFieldsAppliers[field];
-        return applier && applier(r, values, field, query) || r;
+      // Reducing on appliers instead of query as it can be modified
+      queryFieldsAppliers,
+      (r, applier, field) => {
+        const values = query[field];
+        return values && values.length && applier && applier(r, values, field, query) || r;
       },
       results
     );
@@ -189,14 +209,20 @@ function normalizeQueryFields(queryFieldsNormalizers) {
         const formatter = queryFieldsNormalizers[key];
         if (!formatter) return r;
 
-        r[key] = formatter(arrayify(value));
+        const values = formatter(arrayify(value));
+        if (!values || !values.length) {
+          delete r[key];
+          return r;
+        }
+
+        r[key] = values;
         return r;
       },
       query
     );
 }
 
-const scoring = {
+const scoringBy = {
   skills: matches => {
     const counts = [filterExisting(matches).length];
 
@@ -207,9 +233,9 @@ const scoring = {
         const maxCount = toNumber(bestMatch.endorsementCount);
         const maxSuperCount = toNumber(bestMatch.superEndorsementCount);
 
-        r.push(maxCount, maxSuperCount);
+        r.push(maxCount + 1, maxSuperCount + 1);
       } else {
-        r.push(-Infinity, -Infinity);
+        r.push(0, 0);
       }
       return r;
     }, counts);
@@ -228,114 +254,175 @@ const scoring = {
       return r;
     }, counts);
   },
+  stringField: field => (matches, item, values) => {
+    const normalized = normalize(item[field]);
+
+    return values.reduce(
+      (r, value) => {
+        const count = value === normalized ? Infinity : normalized.indexOf(value) + 1;
+        if (count !== 0) {
+          r[0] += 1;
+        }
+        r.push(count);
+        return r;
+      },
+      [0]
+    );
+  },
+  getField: field => (match, item) => match && item[field]
 };
 
-exports = module.exports = builder(({ maps, search }) => {
-  const queryFields = [
-    'name',
-    'location',
-    'seniority',
-    'skills.name',
-    'positions.companyName',
-    'positions.title',
-  ];
+const uniqueNormalized = compose(mapNormalize, unique);
+const splitUniquedFalsy = str => compose(values => flatMap(values, e => e.split(str)), filterFalsy, unique);
+const splitComma = splitUniquedFalsy(',');
+const splitCommaNormalized = compose(splitComma, mapNormalize, unique, filterFalsy);
+const splitSpace = splitUniquedFalsy(' ');
 
-  const routes = {
-    normalize: normalizeQueryFields({
-      savedSearch: value => mapNormalize(flatMap(value, e => e.split(','))),
-      q: e => e,
-      name: compose(mapNormalize, unique),
-      location: compose(mapNormalize, unique),
-      seniority: applyTo('map', compose(parseRange, (range) => [range[0] * YEAR, range[1] * YEAR])),
-      'skills.name': compose(value => flatMap(value, e => e.split(',')), unique),
-      'positions.companyName': compose(mapNormalize, unique),
-      'positions.title': compose(mapNormalize, unique),
-    }),
-    fetch() {
-      return maps.profiles.slice();
+exports = module.exports = builder(({ maps, indices, search }) => {
+  const normalizeModifiers = normalizeQueryFields({
+    savedSearch: splitComma,
+    similar: compose(splitComma, mapToNumber),
+    q: splitSpace,
+  });
+
+  const modifyQuery = applyQueryFields({
+    q: (results, values, field, query) => {
+      const parsed = parseQuery(values);
+      mergeQueries(query, parsed);
+      if (!query.q.length) delete query.q;
     },
-    init(query, results) {
-      // Init scores and delete old matches
-      results.forEach(profile => {
-        profile.scores = {};
-        delete profile.matches;
-      });
+    savedSearch: (results, values, field, query) => {
+      const searches = getSearches();
+      const filtered = searches
+              .filter(s => values.includes(s.key))
+              .map(s => s.value.query)
+              .concat(query);
+
+      Object.assign(query, filtered.reduce((r, e) => mergeQueries(r, e), {}));
     },
-    apply: applyQueryFields(Object.assign(
-      {
-        savedSearch(results, values, field, query) {
-          const savedSearches = query.savedSearch;
-
-          if (savedSearches.length) {
-            const searches = getSearches();
-            const filtered = searches.filter(s => savedSearches.includes(s.key)).map(s => s.value.query);
-            filtered.reduce((r, e) => mergeQueries(e, r), query);
-          }
-        },
-        q(results, values, field, query) {
-          mergeQueries(query, parseQuery(query.q));
-
-          routes.normalize(query);
-
-          return query.q.length ? search(query.q) : undefined;
-        },
-      },
-      mapToObject(queryFields, filterQueryFields({
-        name: {
-          comparison: isIncludedIn,
-          calcScores: (matches, profile, values) => {
-            const normalized = normalize(profile.name);
-
-            return values.map(name => {
-              if (name === normalized) return Infinity;
-              return normalized.indexOf(name);
-            });
-          },
-        },
-        location: {
-          comparison: isIncludedIn,
-          calcScores: (matches, profile, values) => {
-            const normalized = normalize(profile.location);
-
-            return values.map(location => {
-              if (location === normalized) return Infinity;
-              return normalized.indexOf(location);
-            });
-          },
-        },
-        seniority: {
-          comparison: isInRange,
-          normalizeValue: e => e,
-          calcScores: (matches, profile) => {
-            return profile.seniority;
-          },
-        },
-        'skills.name': {
-          calcScores: scoring.skills,
-        },
-        'positions.companyName': {
-          calcScores: scoring.positions,
-        },
-        'positions.title': {
-          calcScores: scoring.positions,
-        },
-      }))
-    )),
-    format(query, results) {
-      const total = maps.profiles.length;
-      const count = results.length;
-
-      return Object.assign(
-        { total },
-        count !== total ? { count } : {},
-        {
-          _links: {
-            profile: sortByScores(query, results).map(format.profiles()),
-          },
-        },
-        formatProfilesTemplates(query)
-      );
+    similar: (results, values, field, query) => {
+      const profiles = values.map(id => indices.profiles[id]);
+      const pQuery = profiles.reduce((r, profile) => [
+        'skills.name',
+        'positions.companyName',
+        'positions.title',
+      ].reduce(
+        (r, field) => mergeQueries(r, { [field]: deepGet(profile, field) }),
+        r
+      ), query);
     },
+  });
+
+  const normalizeQuery = normalizeQueryFields({
+    id: compose(splitComma, mapToNumber),
+    available: () => true,
+    name: uniqueNormalized,
+    location: uniqueNormalized,
+    seniority: mapParseYearRange,
+    'skills.name': splitCommaNormalized,
+    'positions.companyName': uniqueNormalized,
+    'positions.title': uniqueNormalized,
+  });
+
+  const fetch = (query) => maps.profiles.slice();
+
+  const init = (query, results) => {
+    // Init scores and delete old matches
+    results.forEach(profile => {
+      profile.scores = {};
+      profile.matches = {};
+    });
+    if (!Object.keys(query).length) return results;
+
+    return [];
   };
-  return routes;
+
+  function addItems(opts, func) {
+    return (results, values) =>
+      func(results, values).reduce((r, profile) => {
+        if (!r.includes(profile)) {
+          r.push(profile);
+        }
+        return r;
+      }, results);
+  }
+
+  function addFilteredItems(opts) {
+    const filterItems = filterItemsBy(opts);
+
+    return addItems(opts, (results, values) => filterItems(fetch(), values));
+  }
+
+  const filter = applyQueryFields({
+    id: addFilteredItems({
+      field: 'id',
+    }),
+    'skills.name': addFilteredItems({
+      field: 'skills.name',
+      normalize,
+      scoring: scoringBy.skills,
+    }),
+    'positions.companyName': addFilteredItems({
+      field: 'positions.companyName',
+      normalize,
+      scoring: scoringBy.positions,
+    }),
+    'positions.title': addFilteredItems({
+      field: 'positions.title',
+      normalize,
+      scoring: scoringBy.positions,
+    }),
+    name: addFilteredItems({
+      field: 'name',
+      normalize,
+      comparison: isIncludedIn,
+      scoring: scoringBy.stringField('name'),
+    }),
+    location: addFilteredItems({
+      field: 'location',
+      normalize,
+      comparison: isIncludedIn,
+      scoring: scoringBy.stringField('location'),
+    }),
+    seniority: addFilteredItems({
+      field: 'seniority',
+      comparison: isInRange,
+      scoring: scoringBy.getField('seniority'),
+    }),
+    q: addItems({}, (results, values) => {
+      return search(values).map(profile => {
+        return profile;
+      });
+    }),
+  });
+
+  const filterScores = (query, results) => {
+    const expectedScoresCount = queryFields.filter(field => query[field]).length;
+
+    return results.filter(profile => reduceObject(profile.scores, r => r + 1, 0) === expectedScoresCount);
+  };
+
+  const score = sortByScores;
+
+  const omit = applyQueryFields({
+    similar: (results, values) => results.filter(profile => !values.includes(profile.id)),
+  });
+
+  const setQuery = (query, results) => {
+    results.query = query;
+    return results;
+  };
+
+  return [
+    normalizeModifiers,
+    modifyQuery,
+    normalizeQuery,
+    fetch,
+    init,
+    filter,
+    filterScores,
+    score,
+    omit,
+    setQuery,
+  ];
 });

@@ -12,8 +12,8 @@ exports = module.exports = {
     return (...args) => args.map(func);
   },
 
-  applyTo(method, ...args) {
-    return obj => obj[method](...args);
+  applyTo(method, ...args1) {
+    return (obj, ...args2) => obj[method](...args1, ...args2);
   },
 
   curry(func) {

@@ -1,4 +1,8 @@
 const {
+  compose,
+} = require('../utils/function');
+
+const {
   normalize,
 } = require('../utils/string');
 
@@ -19,11 +23,12 @@ const sortByCountDesc = sortByField('count', compareInts, true);
 const getSearches = require('../searches');
 
 const getProfilesRoute = require('./get-profiles');
+const getProfilesFormatter = require ('./get-profiles-format');
 
 module.exports = data => {
   const { maps, indices } = data;
 
-  const getProfiles = getProfilesRoute(data);
+  const getProfiles = compose(getProfilesRoute(data), getProfilesFormatter(data));
 
   return ({ q }) => {
     q = normalize(q);

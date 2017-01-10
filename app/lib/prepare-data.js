@@ -14,6 +14,8 @@ const {
 
 const {
   forEachObject,
+  mapObject,
+  mapObjectToArray,
   arrayify,
   pushIn,
 } = require('./utils/object');
@@ -51,6 +53,8 @@ const {
 const timer = require('./utils/timer');
 const { Search } = require('./utils/search');
 
+const clj = require('clj-fuzzy');
+
 const compareLength = composeArrayArgs(mapArgs(e => e.length), compareInts);
 const compareNormalized = composeArrayArgs(mapArgs(normalize), compareStrings);
 const compareStartEndDates = composeArrayArgs(mapArgs(({ startDate, endDate }) => [startDate, endDate]), compareDates);
@@ -77,10 +81,16 @@ function calcSeniority(positions) {
   return firstExperience !== Infinity ? diffDateFromNow(firstExperience) : 'N/A';
 }
 
-exports = module.exports = function prepareData(file) {
-  const time = timer().start('profiles');
+const database = require('./database');
 
-  const data = require(`../profiles/${file}`);
+exports = module.exports = function prepareData(file) {
+  const time = timer('prepare').start('read');
+
+  const table = database().table({ name: file });
+
+  time.check('profiles');
+
+  const data = mapObjectToArray(table.get(), e => e);
 
   const profiles = sortByNormalizedName(data);
 
@@ -158,6 +168,31 @@ exports = module.exports = function prepareData(file) {
     fields.reduce((r, field) => (r[field] = maps[field].index, r), {}),
     endorsements
   );
+
+  time.check('fuzzy');
+
+  /*
+  function buildFuzzySkills() {
+    const method = e => clj.phonetics.cologne(e);
+
+    const fuzzies = mapObject(
+      maps['skills.name'].reduce((r, { name }) => {
+        return name.split(' ').reduce((r, name) => {
+          const cologne = method(name);
+          pushIn(r, cologne, name);
+          return r;
+        }, r);
+      }, {}),
+      unique
+    );
+
+   fuzzies.method = method;
+
+   return fuzzies;
+   }
+
+   indices.fuzzy = buildFuzzySkills();
+   */
 
   time.check('skillsRanks');
 
@@ -306,5 +341,5 @@ exports = module.exports = function prepareData(file) {
 
   time.check();
 
-  return { file, search, maps, indices };
+  return { file, search, maps, indices, table };
 };

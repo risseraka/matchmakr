@@ -10,7 +10,7 @@ exports = module.exports = {
     }, r), {});
   },
 
-  index(arr, field, unique, format = e => e) {
+  index(arr, field, unique, format = e => e, keyNormalizer = normalize) {
     if (!arr || !arr.length) return {};
 
     const formatItem = typeof format === 'function' ? format : e => deepGet(e, format);
@@ -23,7 +23,7 @@ exports = module.exports = {
       const key = getKey(e);
 
       return [...[].concat(key)].reduce((r, key) => {
-        if (typeof key === 'string') key = normalize(key);
+        if (typeof key === 'string') key = keyNormalizer(key);
         pushIn(r, key, formatItem(e), unique);
         return r;
       }, r);
