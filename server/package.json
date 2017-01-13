@@ -1,0 +1,28 @@
+{
+  "name": "karmium-server",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "start": "NODE_ENV=production supervisor index",
+    "dev": "NODE_ENV=development supervisor index",
+    "test": "node tests"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^1.15.2",
+    "clj-fuzzy": "^0.3.3",
+    "config": "^1.24.0",
+    "cookie-parser": "^1.4.3",
+    "express": "^4.14.0",
+    "express-session": "^1.14.2",
+    "fast-json-patch": "^1.1.4",
+    "lowdb": "^0.14.0",
+    "method-override": "^2.3.7",
+    "morgan": "^1.7.0",
+    "node-linkedin": "^0.5.4",
+    "session-file-store": "^1.0.0"
+  }
+}

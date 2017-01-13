@@ -26,46 +26,105 @@ function loadTable(name) {
   const filePath = getFilePath(name);
 
   const createTable = (input, key) => {
+    const collections = {};
+
     let data = input || {};
 
     const table = {
       get(key, subKey) {
-        if (key !== undefined) return data[key];
+        if (key !== undefined) {
+          if (collections[key]) {
+            if (subKey !== undefined) {
+              return collections[key].get(subKey);
+            }
+            return collections[key];
+          }
+          return data[key];
+        }
 
-        if (Array.isArray(data)) return data;
-        if (typeof data === 'object') return Object.keys(data).map(k => data[k]);
-        return data;
+        if (key != undefined) {
+          if (subKey !== undefined) {
+            return data[key][subKey];
+          }
+          return data[key];
+        }
+
+        return Object.keys(collections).reduce((r, key) => {
+          r[data] = collections[key].get();
+          return data;
+        }, data);
       },
-
       put(key, value, subKey) {
-        data[key] = value;
-        return table;
-      },
-
-      post(key, value, subKey) {
-        data[key] = (data[key] || []).concat(value);
-        return table;
-      },
-
-      patch(key, obj) {
-        if (obj === undefined) {
-          obj = key;
+        if (value === undefined) {
+          value = key;
           key = undefined;
         }
+
         if (key !== undefined) {
-          obj = { [key]: obj };
+          return table.putCollection(key, value, subKey);
         }
 
-        const patches = jsonpatch.compare(data, obj);
-        jsonpatch.apply(data, patches);
+        data = value;
         return table;
       },
-      delete(key) {
-        if (key !== undefined) {
-          delete data[key];
-        } else {
-          data = {};
+      post(key, value, subKey) {
+        if (value === undefined) {
+          value = key;
+          key = undefined;
         }
+
+        if (key !== undefined) {
+          return table.postCollection(key, value, subKey);
+        }
+
+        if (!Array.isArray(data)) {
+          data = [data];
+        }
+        data = data.concat(value);
+        return table;
+      },
+      patch(obj) {
+        const patches = jsonpatch.compare(data, obj);
+        jsonpatch.apply(data, patches);
+        return patches;
+        return table;
+      },
+      delete() {
+        data = {};
+        return table;
+      },
+
+      putCollection(key, value, subKey) {
+        let sub = collections[key];
+        if (!sub) {
+          sub = collections[key] = createTable(data && data[key], key);
+        }
+
+        if (subKey !== undefined) {
+          sub.put(subKey, value);
+        } else {
+          sub.put(value);
+        }
+
+        data[key] = sub.get();
+        return table;
+      },
+
+      postCollection(key, value, subKey) {
+        let sub = collections[key];
+        if (!sub) {
+          sub = collections[key] = createTable(data && data[key], key);
+        }
+
+        if (subKey !== undefined) {
+          sub.post(subKey, value);
+        } else if (data[key]) {
+          sub.post(value);
+        } else {
+          sub.put(value);
+        }
+
+        data[key] = sub.get();
         return table;
       },
 
